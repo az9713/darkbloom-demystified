@@ -5,6 +5,8 @@
 1. The paper: *Private Distributed Inference on Consumer Hardware* (Gajesh Naik, Eigen Labs, April 2026) — included here as [`dginf-private-inference.pdf`](dginf-private-inference.pdf).
 2. The `d-inference` repository code, examined at release candidate v0.8.14 (2026-08-26).
 
+Video introduction: Matt Berman's ["This feels illegal..."](https://www.youtube.com/watch?v=z1ez0yWu1P4) covers Darkbloom.
+
 Darkbloom turns idle Apple Silicon Macs into a private, OpenAI-compatible inference cloud. The Mac owner has root access and physical custody — yet the owner cannot read the prompts or the replies. These docs explain how that works, how the network manages a fleet of home machines, how the accounting stays fair, and which hard questions remain open.
 
 ## Read the tutorial
