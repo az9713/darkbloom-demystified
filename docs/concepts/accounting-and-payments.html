@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Accounting and Payments: Why the Numbers Are Fair</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0f172a; color: #cbd5e1;
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { color: #e2e8f0; line-height: 1.25; }
+h1 { font-size: 1.9rem; border-bottom: 2px solid #334155; padding-bottom: 12px; }
+h2 { font-size: 1.4rem; margin-top: 2.2em; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
+h3 { font-size: 1.15rem; margin-top: 1.8em; }
+a { color: #2dd4bf; text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #e2e8f0; }
+code { background: #1e293b; color: #fb923c; padding: 2px 6px; border-radius: 4px;
+  font: 0.875em ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: #e2e8f0; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 0.925rem; }
+th, td { border: 1px solid #334155; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #1e293b; color: #e2e8f0; }
+tr:nth-child(even) td { background: rgba(30, 41, 59, 0.45); }
+blockquote { border-left: 3px solid #fb923c; margin: 1em 0; padding: 4px 18px;
+  color: #94a3b8; background: #1e293b; border-radius: 0 8px 8px 0; }
+li { margin: 4px 0; }
+hr { border: none; border-top: 1px solid #334155; margin: 2em 0; }
+footer { margin-top: 60px; color: #94a3b8; font-size: 0.85rem;
+  border-top: 1px solid #1e293b; padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Accounting and Payments: Why the Numbers Are Fair</h1>
+<p>Money flows: consumers deposit, requests debit, providers earn, providers withdraw. This document traces one micro-dollar through that pipeline and names every control that keeps the accounting honest.</p>
+<h2>The unit: micro-USD</h2>
+<p>Every amount in the system is an integer count of micro-USD: 1 USD = 1,000,000 micro-USD (<code>coordinator/payments/payments.go</code>). Integer arithmetic means no floating-point rounding drift, ever. The store (Postgres in production) owns balance atomicity and writes a ledger entry for every mutation — deposits, charges, refunds, payouts, rewards. <code>GET</code> history endpoints expose the full ledger per account.</p>
+<h2>Prices</h2>
+<p>Price resolution for a request, in order (<code>coordinator/payments/pricing.go</code>):</p>
+<ol>
+<li>The serving provider's custom price (<code>store.GetModelPrice(providerAccountID, model)</code>).</li>
+<li>The platform admin price from the DB (<code>model_prices</code> table, <code>account_id="platform"</code>, set via <code>PUT /v1/admin/pricing</code>).</li>
+<li>Hardcoded fallbacks: $0.05 per 1M input tokens (50,000 micro-USD), $0.20 per 1M output tokens (200,000 micro-USD).</li>
+</ol>
+<p>All prices are micro-USD per 1M tokens. Live pricing is public at <code>GET /v1/pricing</code>. Two floors exist:</p>
+<ul>
+<li><strong>Direct consumers</strong>: a minimum charge of 100 micro-USD ($0.0001) per request.</li>
+<li><strong>Service/wholesale channels</strong> (e.g. OpenRouter, <code>Role == service</code>): no per-request minimum — the debit must match the published per-token feed exactly — but a request with nonzero usage never rounds to $0; integer flooring is caught and charged at least 1 micro-USD. Wholesale traffic is always billed at the platform price, never a provider's higher custom price.</li>
+</ul>
+<h2>The life of one charge</h2>
+<p>The settlement design is <strong>reserve first, settle exact, refund the difference</strong>. Code: reservation in <code>coordinator/api/consumer.go</code>; settlement in <code>handleCompleteAt</code>, <code>coordinator/api/provider.go:1785</code>.</p>
+<ol>
+<li><strong>Reserve.</strong> Before dispatch, the coordinator estimates the cost (estimated prompt tokens + <code>max_tokens</code> at the resolved rates) and reserves that amount against the consumer's balance. No balance, no dispatch — a provider can never serve an unfunded request.</li>
+<li><strong>Serve.</strong> The provider streams the answer and reports final usage (<code>prompt_tokens</code>, <code>completion_tokens</code>) in its completion message.</li>
+<li><strong>Settle.</strong> The coordinator computes the exact cost from the reported usage and the resolved prices, inside a finalization gate (<code>FinalizeReservation</code> / <code>MarkReservationFinalized</code>) so a concurrent timeout-refund path can never race the settlement into a double charge or double refund.</li>
+<li>Cost below the reservation → the difference is <strong>refunded</strong>. A failed refund credit is never swallowed: it logs an error and emits <code>billing.credit_failed</code> — over-charging a consumer silently is treated as a bug class of its own.</li>
+<li>Cost above the reservation → the coordinator charges the overage, <strong>capped at 2× the reservation</strong> (<code>totalCost ≤ 2 × ReservedMicroUSD</code>). The cap is an explicit fraud circuit-breaker: a provider reporting absurd token counts cannot bill more than twice the pre-flight estimate, and the clamp emits <code>billing.cost_clamped</code>.</li>
+<li>Consumer balance insufficient at settlement → the uncollected charge zeroes, <strong>and the provider payout zeroes with it</strong> (<code>billing.uncollected_zeroed</code>). The platform never pays a provider money it could not collect.</li>
+<li><strong>Credit the provider.</strong> <code>providerPayout = totalCost − platform fee</code>. The request appears in the provider's earnings (<code>GET /v1/provider/account-earnings</code>) and in the leaderboard, which separates <code>work_earnings_micro_usd</code> (inference) from <code>reward_earnings_micro_usd</code> (referral + admin rewards).</li>
+</ol>
+<p>Failed requests settle at $0: an error, a timeout, or a pre-content failover refunds the reservation (<code>refundProviderExtra</code> is idempotent — it resets to the base reservation so a retry path cannot double-refund).</p>
+<h2>Who counts the tokens — the honest answer</h2>
+<p>The <strong>provider</strong> reports the billable token counts, and the provider is the adversary of the threat model. The coordinator cannot recount exactly (by design, it does not retain the plaintext). The controls, named plainly:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Control</th>
+<th>What it stops</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2× overage clamp</td>
+<td>Unbounded over-billing by inflated counts</td>
+</tr>
+<tr>
+<td>Reservation gate</td>
+<td>Billing beyond what the consumer's request shape justified, beyond 2×</td>
+</tr>
+<tr>
+<td><code>billing.zero_usage_complete</code> metric + provider-side content-frame floor</td>
+<td>The opposite fraud/bug — completed work reported as zero tokens (billed $0, refunded)</td>
+</tr>
+<tr>
+<td><code>reconcileOutputAdmission</code></td>
+<td>Reported completion tokens feed back against the admitted token budget</td>
+</tr>
+<tr>
+<td>Consumer-visible usage</td>
+<td>Every response carries usage; a consumer comparing text length to billed tokens exposes systematic inflation</td>
+</tr>
+</tbody>
+</table></div>
+<p>Within the 2× envelope, moderate over- or under-reporting is detectable by monitoring, not prevented by cryptography. See <a href="../reference/unknown-unknowns.html">../reference/unknown-unknowns.md</a>, entry 2.</p>
+<h2>The platform fee — currently zero</h2>
+<p><code>platformFeePercent = 0</code> (<code>coordinator/payments/pricing.go:44</code>) for the public alpha: providers keep 100% of revenue, matching the README and the landing page. Per-account overrides exist (<code>PUT /v1/admin/users/platform-fee</code>) and the referral program pays referrers a share of the platform fee — so with a 0% default fee, referrals are dormant. One wrinkle for code readers: the package comment in <code>payments.go</code> still says "minus 10% platform fee" — that comment is stale; the constant is authoritative.</p>
+<h2>Self-route settles free — with a closed loophole</h2>
+<p>A request with <code>X-Darkbloom-Route: self</code> (or <code>prefer</code> that landed on an owned machine) settles at $0. The rule is checked at <strong>settlement</strong>, against the machine that actually served: free <strong>iff</strong> the serving provider's <code>AccountID</code> equals the requesting account. Exclusive self-route served by a non-owned provider — which should be impossible — settles as <strong>paid</strong> and logs an error (defense-in-depth against a "mark it free, serve it elsewhere" hole). <code>prefer</code> falling back to a public provider settles paid; that is the normal, expected path.</p>
+<h2>Money in, money out</h2>
+<ul>
+<li><strong>In</strong>: Stripe Checkout deposits; the webhook credits the internal balance.</li>
+<li><strong>Out</strong>: provider withdrawals via Stripe Connect Express (bank/card), with region handling in <code>coordinator/billing/stripe_regions.go</code>. A provider without a payout destination is skipped for paid public traffic at dispatch time — work that could not be paid is never assigned.</li>
+</ul>
+<h2>Base rewards: paid even when the network is quiet</h2>
+<p>Design: <code>d-inference/docs/base-rewards.md</code> (2026-06-06); implementation in <code>coordinator/payments/baserewards/</code> (<code>engine.go</code>, <code>epoch.go</code>, <code>floor.go</code>, <code>alloc.go</code>). The promise: <em>"Run a 64GB+ Mac on Darkbloom and even when the network is quiet, you earn at least a Netflix subscription."</em></p>
+<ul>
+<li><strong>Additive, not a backstop</strong>: <code>payout = earned + floor</code>. Organic earnings are never clawed back against the floor (a reduction knob <code>k</code> exists; shipped value 0).</li>
+<li><strong>Tiers by verified memory</strong>: $10/month at 24 GB, <strong>$18 at 64 GB (the anchor — Netflix Standard is $17.99)</strong>, $26 at 128 GB, $40 at 512 GB.</li>
+<li><strong>Verified, not self-reported</strong>: the tier is capped by the serial-number→model maximum-memory lookup cross-checked against reported <code>MemoryGB</code>. A small Mac claiming 512 GB banks nothing extra.</li>
+<li><strong>Gated</strong>: only attested, account-linked machines that are online, healthy, and holding a loaded routable model accrue the floor.</li>
+<li><strong>Pool-bounded</strong>: a fixed monthly pool (<code>FLOOR_POOL_B</code>) is prorated into 5-minute settlement periods and water-filled across eligible machines <strong>smallest-tier-first</strong> (the 48–96 GB workhorse tier fills before idle 512 GB boxes can drain the pool). Total program cost is capped at the fleet level; no individual promise is cut because the machine earned.</li>
+</ul>
+<p>The stated trade-off: additive floors do not self-liquidate — the program runs near the pool cap while switched on. The design document says so explicitly.</p>
+<h2>Why trust any of this</h2>
+<p>Three structural reasons, beyond reading the code:</p>
+<ol>
+<li><strong>Every mutation is a ledger entry</strong> on an atomic store — balances are reconstructible from history.</li>
+<li><strong>The E2E test framework asserts accounting integrity</strong> (<code>e2e/testbed/assert/</code> — latency thresholds <em>and</em> accounting integrity assertions run against a real coordinator, real Postgres, real provider binary).</li>
+<li><strong>Failure paths are metered</strong>: <code>billing.cost_clamped</code>, <code>billing.overage_charged</code>, <code>billing.uncollected_zeroed</code>, <code>billing.credit_failed</code>, <code>billing.zero_usage_complete</code> all emit to Datadog dashboards — a systematic billing anomaly is a visible graph, not a silent drift.</li>
+</ol>
+<footer>Darkbloom explainer docs &middot; generated from <code>accounting-and-payments.md</code> &middot; 2026-08-27</footer>
+</main>
+</body>
+</html>

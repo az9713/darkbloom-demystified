@@ -1,0 +1,55 @@
+# Unknown Unknowns: The Questions You Did Not Know to Ask
+
+Marketing answers the questions people ask. This page asks the questions the architecture quietly raises, and answers each one from the paper and the code. Each entry ends with a status: **Solved** (a mechanism closes it), **Partial** (mitigated, with a named residue), or **Open** (acknowledged, unsolved).
+
+## 1. Encryption hides my prompt — but who proves the model computed my answer honestly?
+
+Nobody, cryptographically. The Secure Enclave signature on each response (`SESignature`, `ResponseHash` in the completion message) proves **origin and integrity** — this attested machine produced these bytes, unmodified. It does not prove **correctness** — that the genuine model, at your requested settings, produced them. A hostile provider running the genuine binary still cannot substitute output (the binary is code-attested and the pipeline is inside it), but bugs, quantization differences, or a degraded machine can produce bad output that no proof catches. The same gap covers the weights: the coordinator's weight-hash verification is currently **fail-open** (`d-inference/docs/threat-model.yaml`, SEC-007) — download-time SHA-256 checks plus code-attested reporting, not independent proof of which weights ran. The paper's related-work section is candid: zero-knowledge inference proofs (zkLLM, DeepProve-1) verify integrity but remain impractical for interactive LLM inference. Darkbloom's actual recourse is statistical: health breakers, shape-keyed error cooldowns, and reputation — detection, not proof. **Open** (industry-wide).
+
+## 2. Who counts the tokens I am billed for?
+
+The provider — the adversary of the threat model — reports `prompt_tokens` and `completion_tokens`. The coordinator cannot recount exactly because it does not retain plaintext. The envelope of possible cheating: over-billing is capped at 2× the pre-flight reservation (fraud circuit-breaker, `billing.cost_clamped`); zero-token completions bill $0 and alarm (`billing.zero_usage_complete`); reported counts reconcile against the admitted token budget (`reconcileOutputAdmission`); and consumers see usage on every response, so systematic inflation is externally checkable. Within that envelope, billing rests on detection and clamps, not cryptographic proof. **Partial** — see [../concepts/accounting-and-payments.md](../concepts/accounting-and-payments.md).
+
+## 3. Other people's requests run on the same Mac at the same time as mine. What separates us?
+
+Software correctness, not hardware isolation. Continuous batching merges all concurrent requests into one forward pass inside **one process address space** — the same address space that makes owner-observation impossible also holds every concurrent consumer's tokens together. There is no per-request memory encryption or hardware partition between consumers; separation is the correctness of the batching engine (per-slot KV, per-request buffers, `memset_s` zeroing after completion). Nothing suggests a leak path, but the guarantee class is "correct code", weaker than the "kernel-enforced" class protecting against the owner. **Partial** (accepted by design; each provider serves up to 4 concurrent requests).
+
+## 4. Does prompt caching share my prompts with other users?
+
+No. Cache-aware routing is scoped per account: the cache scope ID is an HMAC (SHA-256, key derived from a coordinator master key with the label `darkbloom/cache-routing/scope/v3`) over — among other fields — **your account** and the model (`coordinator/registry/cache_route_keys.go`, `providerCacheScope`). Another account's identical prefix produces a different opaque scope and cannot hit your cache. On the provider, cached KV state is encrypted at rest with a Secure-Enclave-wrapped key-encryption key (`ProviderCore/KVCache/`). Route keys on the wire are opaque HMACs, so cache coordination reveals no prompt content. **Solved** (given an honest coordinator — see entry 6).
+
+## 5. What happens to my prompt after the answer?
+
+On the provider: buffers holding prompts and outputs are zeroed with `memset_s` (guaranteed not compiler-eliminated) when the request completes; core dumps are disabled (`RLIMIT_CORE = 0`), so no crash artifact holds them; KV-cache persistence is encrypted (entry 4); an idle model unloads after 1 hour. On the coordinator: prompt content is never logged or retained, the per-request chunk key is forgotten at request end (`chunk_key_cache.go`), and the telemetry pipeline has an explicit field allowlist (`coordinator/api/telemetry_handlers.go`) as a privacy backstop — prompt/completion fields structurally cannot enter telemetry. **Solved**, within entry 6's trust statement.
+
+## 6. Can Darkbloom-the-company read my prompts?
+
+Technically yes, today — and the repository says so itself. The design answer is no: an SEV-SNP Confidential VM with an attested image, opaque even to the operator. Production reality, from `d-inference/docs/operations/coordinator-deploy.md`: the VM runs AMD **SEV** (the runbook says "Do not claim SEV-SNP for this VM"), TLS terminates in host Caddy and crosses localhost to the container in the clear unless the consumer enables Hop-1 sealing — which is **off by default** (`threat-model.yaml`, SEC-015) — and the operator holds IAP SSH into the VM, where guest root defeats any SEV variant. Nothing is logged or retained, so reading prompts would take deliberate action against stated policy; but the barrier is policy and audit, not hardware. Also missing: any consumer-facing procedure to verify the coordinator image (compare Apple PCC's transparency logs). **Open today; the paper's design (SEV-SNP + verifiable attestation) is the fix, not yet deployed.** See the Hop-2 section of [../concepts/encryption-path.md](../concepts/encryption-path.md).
+
+## 7. Does the Mac owner learn who I am, or the coordinator learn what I ask?
+
+Split answer. The provider learns nothing about your identity (it receives ciphertext from the coordinator over one WebSocket, with no consumer identifiers) — but it does see timing (see [../concepts/performance-economics-limits.md](../concepts/performance-economics-limits.md)). The coordinator, by contrast, knows **both** who you are (auth, billing) and — transiently — what you asked. Nothing links them today for an outside observer, but non-targetability (the property that nobody can aim a specific user's traffic at a specific machine, or link identity to content) is explicitly future work: OHTTP relays (RFC 9458) plus RSA blind signatures, Apple PCC's fourth requirement. **Open**, stated in the paper.
+
+## 8. Can someone farm the rewards with fake or idle hardware?
+
+The base-rewards design assumes people will try. Defenses: the floor tier is capped by **verified** memory (serial-number→model maximum-memory lookup, not the self-reported figure — a small Mac claiming 512 GB banks nothing); eligibility requires attested + linked + online + healthy + a loaded routable model; settlement is 5-minute-period, uptime-gated; the pool is fixed monthly and water-fills smallest-tier-first, so idle big boxes cannot drain it; and the whole program is bounded by `FLOOR_POOL_B` regardless of how many machines join. Sybil pressure ("many small attested Macs") is bounded by the same pool cap and by hardware attestation making each identity a real, MDM-enrolled machine. **Solved** at the economic-design level (the design document names its own residual risks).
+
+## 9. What single points of failure sit under all five attestation layers?
+
+Apple, four times over: APNs delivery (Layer 5 dies without it — and it already excludes headless Macs), the MDA attestation CA (Layer 3 is exactly as trustworthy as Apple's Enterprise Attestation Root CA), notarization/Developer ID (binary distribution), and macOS itself (Assumption 1: no unpatched kernel bypass of SIP/Hardened Runtime/KIP). A malicious-Apple or compromised-Apple-CA scenario defeats the architecture — the paper classifies this with "trusting any certificate authority in the Web PKI". There is also an operational single point: one coordinator (one company) does all routing, billing, and attestation verification; "decentralized" describes the compute supply, not the control plane. **Open** (explicit trust assumptions).
+
+## 10. If my request dies halfway, do I pay? Does the provider get paid?
+
+Before the first content chunk: you pay nothing, and the request silently retries on another machine (pre-content failover); the reservation refunds. After content has flowed: an error surfaces to you in-band, and settlement bills the reported usage for what was produced; if you disconnect mid-stream, the provider still completes and is still paid (the parked-settlement path in `handleCompleteAt` — `coordinator/api/provider.go:1785`), because the work was done. A provider that never gets paid for interrupted work would learn to distrust the queue; a consumer billed for nothing-delivered would learn to distrust the network. The settlement rules are built to keep both incentives straight. **Solved**.
+
+## 11. Whose models are these, and can a provider steal the weights?
+
+Today's catalog is open-weight models (Qwen, Gemma, Llama, MiniMax, gpt-oss) distributed through the registry with per-file SHA-256 verification — there is nothing secret to steal, and weight *integrity* (you get the genuine model) is what the hashes protect. Proprietary-model protection — weights encrypted at rest, keys released only against a full attestation chain, decrypted only inside the hardened process — is designed but future work in the paper. **Open by scope** (not needed for the current catalog).
+
+## 12. Do the project's own claims always match its own code?
+
+No — three documented cases, all caught by reading, all worth knowing as a consumer of the docs. (1) `AGENTS.md`/`CLAUDE.md` say "the coordinator never sees plaintext prompts"; the README's "Precise claim" block and the paper correct this to the hop-by-hop statement. (2) The `payments.go` package comment says providers earn "total cost minus 10% platform fee"; the authoritative constant is `platformFeePercent = 0` (alpha). (3) The paper says the coordinator runs in an SEV-**SNP** CVM; the deploy runbook reports plain AMD SEV and forbids the SNP claim (entry 6). The pattern: where an aspirational doc and an operational doc disagree, the operational doc (`coordinator-deploy.md`, `threat-model.yaml`) and the code constants win. **Solved by this docs set** — and a reason this page exists.
+
+## 13. How many Macs see my prompt?
+
+Up to N, not 1. Speculative dispatch seals the same request to a backup provider at 50% of the first-token deadline, and pre-content failover re-sends it after a silent early death — each such machine decrypts and prefills the prompt before its cancel lands. Every one of them is a fully attested, code-attested hardened process, and buffers zero on cancel as on completion; but "one prompt, one machine" is the common case, not an invariant. See the failure-handling section of [../concepts/routing.md](../concepts/routing.md). **Solved** (bounded to attested processes), worth knowing.

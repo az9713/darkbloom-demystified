@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Paper vs. Repository: The Deltas</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0f172a; color: #cbd5e1;
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { color: #e2e8f0; line-height: 1.25; }
+h1 { font-size: 1.9rem; border-bottom: 2px solid #334155; padding-bottom: 12px; }
+h2 { font-size: 1.4rem; margin-top: 2.2em; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
+h3 { font-size: 1.15rem; margin-top: 1.8em; }
+a { color: #2dd4bf; text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #e2e8f0; }
+code { background: #1e293b; color: #fb923c; padding: 2px 6px; border-radius: 4px;
+  font: 0.875em ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: #e2e8f0; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 0.925rem; }
+th, td { border: 1px solid #334155; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #1e293b; color: #e2e8f0; }
+tr:nth-child(even) td { background: rgba(30, 41, 59, 0.45); }
+blockquote { border-left: 3px solid #fb923c; margin: 1em 0; padding: 4px 18px;
+  color: #94a3b8; background: #1e293b; border-radius: 0 8px 8px 0; }
+li { margin: 4px 0; }
+hr { border: none; border-top: 1px solid #334155; margin: 2em 0; }
+footer { margin-top: 60px; color: #94a3b8; font-size: 0.85rem;
+  border-top: 1px solid #1e293b; padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Paper vs. Repository: The Deltas</h1>
+<p>The paper (<code>papers/dginf-private-inference.tex</code>, April 2026) describes a real but earlier system. The repository moved on. Check this table before quoting the paper.</p>
+<p>Repository state examined: 2026-08-27; latest <code>CHANGELOG.md</code> entry is release candidate v0.8.14 (2026-08-26, not shipped).</p>
+<h2>Claims to adjust</h2>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Paper claim</th>
+<th>Repository state</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Coordinator runs in an AMD SEV-<strong>SNP</strong> Confidential VM; even the operator cannot access its memory</td>
+<td>The deploy runbook (<code>docs/operations/coordinator-deploy.md</code>) reports the production VM as AMD <strong>SEV</strong> with maintenance policy <code>MIGRATE</code> and states "Do not claim SEV-SNP for this VM." TLS terminates in host Caddy and crosses localhost in the clear unless the consumer's optional sealing is on — which is off by default (<code>threat-model.yaml</code>, SEC-015). The operator has IAP SSH. The paper's coordinator guarantee is design intent, not deployed fact.</td>
+</tr>
+<tr>
+<td>Coordinator weight/hash policy protects model integrity</td>
+<td>Weight-hash verification is currently fail-open (<code>threat-model.yaml</code>, SEC-007).</td>
+</tr>
+<tr>
+<td>~14,500 lines total (provider 6,000 Swift; coordinator 4,000 Go)</td>
+<td>~90,244 Swift lines in <code>provider-swift/Sources/</code>; ~88,118 non-test Go lines in <code>coordinator/</code>. The paper describes the validation-era build; the production system is ~12× larger.</td>
+</tr>
+<tr>
+<td>"No subprocess, no local server, no IPC"</td>
+<td>True for the coordinator-routed private path. <code>darkbloom start --local</code> runs a Hummingbird HTTP server (<code>provider-swift/Sources/ProviderCore/Server/StandaloneServer.swift</code>) for the owner's own standalone use — outside the privacy boundary by design. Scope the claim to the private path.</td>
+</tr>
+<tr>
+<td>Hypervisor Stage-2 memory isolation defends RDMA</td>
+<td>Validated experimentally (0% overhead; 60 GB pool mapped in 2.5 ms), <strong>not enforced</strong>. <code>hypervisorActive</code> is telemetry. <code>CLAUDE.md</code> notes current providers no longer even send the field; the coordinator keeps decoding it so older (&lt; v0.6.31) signed payloads still verify.</td>
+</tr>
+<tr>
+<td>RDMA-without-hypervisor providers are excluded</td>
+<td>By operational policy only. No strict scheduler gate exists yet; the paper itself concedes this in its Hypervisor section, but summaries often miss it.</td>
+</tr>
+<tr>
+<td><code>binaryHash</code> in the attestation blob</td>
+<td>Demoted since v0.6.0 to drift telemetry and transparency-log matching. The live code-identity gate is APNs attestation (Layer 5). The hash stays in the SE-signed canonical so a blessed-build policy can return as an emergency gate.</td>
+</tr>
+<tr>
+<td>ACME <code>device-attest-01</code> in the enrollment profile</td>
+<td>Shipped but inactive. The hardware-bound key lands in a platform-restricted keychain third-party apps cannot access, and the leaf lacks SIP/SecureBoot OIDs. MDA-over-MDM is the operative provenance path; ACME is retained for future transport-layer use.</td>
+</tr>
+<tr>
+<td>Coordinator uses step-ca</td>
+<td>Legacy. <code>coordinator/stateexport/</code> archives "MicroMDM (+ legacy step-ca) state" for migration; the active stack is MicroMDM + SCEP + MDA.</td>
+</tr>
+<tr>
+<td>"The coordinator never sees plaintext" (in repo docs, not the paper)</td>
+<td>The paper and <code>README.md</code> are precise: plaintext exists transiently in CVM memory, never logged or retained. <code>AGENTS.md</code> and <code>CLAUDE.md</code> still carry the loose sentence. The precise version is correct.</td>
+</tr>
+</tbody>
+</table></div>
+<h2>Production subsystems the paper does not cover</h2>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Subsystem</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>EngineV2 continuous batching — all concurrent requests merged into one batched forward pass per step; near-linear scaling (B=4/B=1 = 3.8× on Qwen, 2.9× on Gemma MoE)</td>
+<td><code>provider-swift/Sources/ProviderCore/Inference/EngineV2*.swift</code>, <code>docs/engine-v2/</code></td>
+</tr>
+<tr>
+<td>Encrypted KV cache — Secure-Enclave-wrapped key-encryption key, encrypted store, SSD block store with no-follow IO</td>
+<td><code>provider-swift/Sources/ProviderCore/KVCache/</code>, <code>KVCacheSSD/</code></td>
+</tr>
+<tr>
+<td>Prompt-prefix cache routing — cache-aware provider selection with HMAC-derived route keys and receipts</td>
+<td><code>coordinator/registry/cache_*.go</code></td>
+</tr>
+<tr>
+<td>Speculative decoding and multi-token prediction (MTP) — <code>mtp_mode = "auto" \| "on" \| "off"</code> as of v0.8.14</td>
+<td><code>provider-swift/Sources/ProviderCore/SpecDec/</code>, <code>EngineV2MTPAssistant.swift</code></td>
+</tr>
+<tr>
+<td>Vision serving — Qwen3-VL per-image tower prefill with memory budgeting (<code>VisionTowerBudget</code>), video spans, M-RoPE</td>
+<td><code>EngineV2Vision*.swift</code>; v0.8.13–v0.8.14 changelog</td>
+</tr>
+<tr>
+<td>Billing — Stripe deposits into a micro-USD ledger, Stripe Connect payouts, referrals, base rewards</td>
+<td><code>coordinator/payments/</code>, <code>coordinator/billing/</code></td>
+</tr>
+<tr>
+<td>Self-route and private-only machines</td>
+<td><code>docs/provider/self-route.md</code>; gates 7–8 in <a href="../concepts/routing.html">../concepts/routing.md</a></td>
+</tr>
+<tr>
+<td>Speculative TTFT dispatch, pre-content failover, two-lane provider writer, single-parse frame decode</td>
+<td><code>coordinator/registry/provider_writer.go</code>, <code>coordinator/protocol/type_scan.go</code>, <code>coordinator/api/chunk_key_cache.go</code></td>
+</tr>
+<tr>
+<td>Trust-status UI, console, admin dashboard, landing</td>
+<td><code>console-ui/</code>, <code>admin-ui/</code>, <code>landing/</code></td>
+</tr>
+<tr>
+<td>Fan control service</td>
+<td><code>provider-swift/Sources/DarkbloomFan*</code></td>
+</tr>
+<tr>
+<td>Tool-schema normalization + template-render self-check fencing</td>
+<td><code>coordinator/api/toolschema.go</code>, Swift <code>ToolSchemaNormalization</code>, <code>TemplateRenderCheck</code></td>
+</tr>
+</tbody>
+</table></div>
+<h2>Where paper and code agree exactly</h2>
+<p>Worth saying, because it is most of the security core: the NaCl Box construction and wire format (verified cross-language in <code>coordinator/internal/e2e/</code>); per-request ephemeral keys; the raw-bytes signature verification with the Swift <code>\/</code> escaping caveat (<code>coordinator/attestation/attestation.go:132</code>); <code>PT_DENY_ATTACH</code> + Hardened Runtime + SIP with fail-closed startup; <code>memset_s</code> buffer zeroing; <code>AccessRights = 1041</code>; the MDA freshness-nonce SE-key binding; the APNs protocol; the 5-minute challenge cadence with immediate untrust; and the routing gate list, which the paper reproduces from <code>providerPassesRoutingGatesLocked</code> nearly verbatim.</p>
+<h2>The privacy-claim wrinkle inside the repo</h2>
+<p><code>AGENTS.md</code> (and <code>CLAUDE.md</code>) state the loose privacy claim while <code>README.md</code> corrects it in a dedicated "Precise claim" paragraph. When writing about Darkbloom, always use the README/paper formulation: hop-by-hop encryption; transient plaintext only inside attested CVM memory; never logged or retained; provider is the final decryption endpoint, bound to an attested Secure Enclave identity.</p>
+<footer>Darkbloom explainer docs &middot; generated from <code>paper-vs-repo.md</code> &middot; 2026-08-27</footer>
+</main>
+</body>
+</html>

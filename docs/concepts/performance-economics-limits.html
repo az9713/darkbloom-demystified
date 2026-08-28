@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Performance, Economics, and Limits</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0f172a; color: #cbd5e1;
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { color: #e2e8f0; line-height: 1.25; }
+h1 { font-size: 1.9rem; border-bottom: 2px solid #334155; padding-bottom: 12px; }
+h2 { font-size: 1.4rem; margin-top: 2.2em; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
+h3 { font-size: 1.15rem; margin-top: 1.8em; }
+a { color: #2dd4bf; text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #e2e8f0; }
+code { background: #1e293b; color: #fb923c; padding: 2px 6px; border-radius: 4px;
+  font: 0.875em ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: #e2e8f0; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 0.925rem; }
+th, td { border: 1px solid #334155; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #1e293b; color: #e2e8f0; }
+tr:nth-child(even) td { background: rgba(30, 41, 59, 0.45); }
+blockquote { border-left: 3px solid #fb923c; margin: 1em 0; padding: 4px 18px;
+  color: #94a3b8; background: #1e293b; border-radius: 0 8px 8px 0; }
+li { margin: 4px 0; }
+hr { border: none; border-top: 1px solid #334155; margin: 2em 0; }
+footer { margin-top: 60px; color: #94a3b8; font-size: 0.85rem;
+  border-top: 1px solid #1e293b; padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Performance, Economics, and Limits</h1>
+<p>The measured numbers, why the economics work, and what the system honestly does not protect.</p>
+<h2>Measured results</h2>
+<p>End-to-end validation ran on two machines at once: an AWS <code>mac2-m2.metal</code> instance (Apple M2, 24 GB unified memory, macOS 14.8.4) and a local M4 Max (48 GB, macOS 26.3). Both passed all five attestation layers, then served live traffic.</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Measurement</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Decode, Qwen3.5 9B Q4, M4 Max</td>
+<td>92 tok/s</td>
+</tr>
+<tr>
+<td>Decode, Qwen3.5 9B Q4, M2</td>
+<td>22 tok/s</td>
+</tr>
+<tr>
+<td>Time to first token</td>
+<td>1.4 s</td>
+</tr>
+<tr>
+<td>SIP check per request</td>
+<td>12 ms — the largest per-request security cost, dominated by the <code>csrutil status</code> subprocess; one startup check would suffice by the SIP theorem, so this is defense-in-depth</td>
+</tr>
+<tr>
+<td>8 concurrent requests, 2 providers</td>
+<td>100% success; 6,517 tokens in 76.2 s</td>
+</tr>
+<tr>
+<td>Cancel propagation on consumer disconnect</td>
+<td>&lt; 1 s, coordinator → provider → engine</td>
+</tr>
+<tr>
+<td>Reconnect after disconnect</td>
+<td>&lt; 1 s</td>
+</tr>
+<tr>
+<td><code>lldb</code> attach against the provider</td>
+<td>Denied</td>
+</tr>
+<tr>
+<td>Hypervisor overhead, Qwen3.5-27B BF16 (50.1 GB), M4 Max 128 GB</td>
+<td>0% — 8.2 tok/s baseline vs 8.0 tok/s with 100% of memory VM-mapped (within noise)</td>
+</tr>
+<tr>
+<td>Map a 60 GB hypervisor pool</td>
+<td>2.5 ms (3,840 × 16 MB chunks)</td>
+</tr>
+<tr>
+<td>AES-256 encrypt+decrypt, 16 MB tensor</td>
+<td>0.37 ms (42.5 GB/s — fast enough to overlap GPU compute at 2.9% effective overhead with double buffering)</td>
+</tr>
+</tbody>
+</table></div>
+<p>Security overhead is negligible: about 12 ms per request.</p>
+<h2>Why the economics work: active parameters vs. total parameters</h2>
+<p>A provider's marginal cost is electricity only:</p>
+<pre><code>C_local = P_elec / (R_tok × 3,600) × 10^6   dollars per million output tokens
+</code></pre>
+<p>At the U.S. average $0.15/kWh, an Apple Silicon workstation draws ~100 W under inference load ($0.015/hr) and 5 W idle.</p>
+<p>Cloud APIs price by <strong>total</strong> parameter count. Local decode cost follows only the <strong>active</strong> parameters per token, because decode is memory-bandwidth-bound and only active expert weights cross the bus. Mixture-of-Experts models therefore break the comparison open:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Architecture</th>
+<th>M4 Max (546 GB/s)</th>
+<th>M3 Ultra (819 GB/s)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Qwen3.5 9B</td>
+<td>Dense</td>
+<td>92 (measured)</td>
+<td>94</td>
+</tr>
+<tr>
+<td>Qwen3.5 27B</td>
+<td>Dense</td>
+<td>21</td>
+<td>32</td>
+</tr>
+<tr>
+<td>Qwen3.5 35B-A3B</td>
+<td>MoE, 3B active</td>
+<td>101</td>
+<td>152</td>
+</tr>
+<tr>
+<td>Llama 3.1 70B</td>
+<td>Dense</td>
+<td>8</td>
+<td>13</td>
+</tr>
+<tr>
+<td>Qwen3.5 122B-A10B</td>
+<td>MoE, 10B active</td>
+<td>25</td>
+<td>35</td>
+</tr>
+<tr>
+<td>MiniMax M2.5 230B</td>
+<td>MoE, 10B active</td>
+<td>does not fit</td>
+<td>40</td>
+</tr>
+</tbody>
+</table></div>
+<p>Unmeasured entries are bandwidth-scaled at 65% efficiency. Note the headline: the 35B MoE (101 tok/s) beats the 27B dense (21 tok/s) despite more total parameters.</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Cloud $/M</th>
+<th>Local $/M (electricity)</th>
+<th>Advantage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Qwen3.5 35B-A3B</td>
+<td>$1.30</td>
+<td>$0.04</td>
+<td>32×</td>
+</tr>
+<tr>
+<td>Qwen3.5 122B-A10B</td>
+<td>$2.08</td>
+<td>$0.09</td>
+<td>23×</td>
+</tr>
+<tr>
+<td>Qwen3.5 27B</td>
+<td>$1.56</td>
+<td>$0.20</td>
+<td>7.8×</td>
+</tr>
+<tr>
+<td>MiniMax M2.5 230B</td>
+<td>$0.95</td>
+<td>$0.16</td>
+<td>6×</td>
+</tr>
+<tr>
+<td>Llama 3.1 70B</td>
+<td>$0.30</td>
+<td>$0.49</td>
+<td>0.6× — the cloud wins</td>
+</tr>
+</tbody>
+</table></div>
+<p>Dense models above ~32B favor H100 clusters (3.35 TB/s bandwidth, ~6× an M4 Max). The sweet spot for Darkbloom is MoE models with small active counts on large unified memory. Pricing is live at <code>GET /v1/pricing</code>; alpha providers keep 100% of revenue; self-route to your own machine is free.</p>
+<h2>What the system does not protect</h2>
+<p>State these as plainly as the guarantees.</p>
+<p><strong>Token timing.</strong> Content is protected; timing is not. The owner sees packets leave their machine. Prefill duration reveals approximate prompt length; packet count reveals response length; inter-token delays reveal generation difficulty. Darkbloom does not implement constant-time inference. Possible mitigations (buffering, jitter) are not deployed. Apple PCC and every non-TEE system share this gap.</p>
+<p><strong>A macOS kernel zero-day.</strong> The entire model rests on Assumption 1: no unpatched kernel bug bypasses SIP, Hardened Runtime, or KIP. Software-enforced boundaries cannot survive kernel compromise; only hardware TEEs can. The defense is Apple's patch record (known SIP-bypass CVEs fixed within weeks), which is a track record, not a proof.</p>
+<p><strong>RDMA over Thunderbolt 5, today.</strong> macOS 26.2+ RDMA lets a physically connected Mac read host memory at 80 Gb/s, bypassing every software protection. It is off by default and needs a Recovery OS boot to enable. Current status, precisely: providers report <code>rdmaDisabled</code> in every challenge response, and the coordinator records it as <strong>telemetry</strong>. <code>hypervisorActive</code> is retired — current providers no longer send it; the coordinator only keeps decoding it so signed payloads from older (&lt; v0.6.31) providers still verify. RDMA-enabled providers are kept off private text by operational policy, but no strict scheduler gate is enforced yet. The validated future fix — Hypervisor.framework Stage-2 page tables that hide inference memory from host physical addressing, measured at 0% overhead — is not production-enforced. Single-node inference with RDMA disabled is the supported boundary.</p>
+<p><strong>Headless Macs.</strong> APNs needs a logged-in GUI Aqua session. A headless or login-screen Mac cannot become code-attested and fails closed for private traffic once enforcement is on.</p>
+<p><strong>Binary version pinning.</strong> APNs proves App ID and Team ID, not the exact release. Downgrade control awaits reproducible builds plus a public transparency log of blessed <code>cdhash</code> values.</p>
+<p><strong>Enrollment reach.</strong> Hardware attestation requires MDM enrollment with Apple attestation authority (MicroMDM + an Apple push certificate). Arbitrary consumer devices need an Apple Business Manager–class pathway.</p>
+<p><strong>The residual physical attack.</strong> Probing LPDDR5x soldered into the SoC package. Desoldering is destructive. Darkbloom accepts it; Apple PCC accepts the same.</p>
+<h2>Future work in the paper</h2>
+<p>OHTTP (RFC 9458) relays plus RSA blind signatures for non-targetability (so the coordinator cannot link identity to content); promoting <code>hypervisorActive</code> to a hard gate; multi-device sharding over Thunderbolt 5 RDMA (&lt; 50 µs latency) toward 400B+ parameter models — single-machine components validated, two-machine RDMA-visibility validation outstanding; encrypted model weights released only against a full attestation chain; and generalizing access-path elimination beyond inference to any confidential computation on consumer hardware.</p>
+<footer>Darkbloom explainer docs &middot; generated from <code>performance-economics-limits.md</code> &middot; 2026-08-27</footer>
+</main>
+</body>
+</html>

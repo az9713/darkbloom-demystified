@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>How Darkbloom Works — Explainer Docs</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0f172a; color: #cbd5e1;
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { color: #e2e8f0; line-height: 1.25; }
+h1 { font-size: 1.9rem; border-bottom: 2px solid #334155; padding-bottom: 12px; }
+h2 { font-size: 1.4rem; margin-top: 2.2em; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
+h3 { font-size: 1.15rem; margin-top: 1.8em; }
+a { color: #2dd4bf; text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #e2e8f0; }
+code { background: #1e293b; color: #fb923c; padding: 2px 6px; border-radius: 4px;
+  font: 0.875em ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: #e2e8f0; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 0.925rem; }
+th, td { border: 1px solid #334155; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #1e293b; color: #e2e8f0; }
+tr:nth-child(even) td { background: rgba(30, 41, 59, 0.45); }
+blockquote { border-left: 3px solid #fb923c; margin: 1em 0; padding: 4px 18px;
+  color: #94a3b8; background: #1e293b; border-radius: 0 8px 8px 0; }
+li { margin: 4px 0; }
+hr { border: none; border-top: 1px solid #334155; margin: 2em 0; }
+footer { margin-top: 60px; color: #94a3b8; font-size: 0.85rem;
+  border-top: 1px solid #1e293b; padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+<h1>How Darkbloom Works — Explainer Docs</h1>
+<p>Darkbloom rents idle Apple Silicon Macs as an OpenAI-compatible inference cloud. The Mac owner has root access and physical custody, yet the owner cannot read your prompt or the model reply.</p>
+<p>These documents explain the system. Sources: the paper <code>dginf-private-inference.pdf</code> (April 2026, Gajesh Naik, Eigen Labs) and the repository <code>d-inference/</code> (release candidate v0.8.14, 2026-08-26). All file references point into <code>d-inference/</code>.</p>
+<h2>Navigation</h2>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Document</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What is Darkbloom? Why does it exist?</td>
+<td><a href="overview/what-is-darkbloom.html">overview/what-is-darkbloom.md</a></td>
+</tr>
+<tr>
+<td>What do the terms mean?</td>
+<td><a href="overview/key-concepts.html">overview/key-concepts.md</a></td>
+</tr>
+<tr>
+<td>How does a prompt travel? Who can read it where?</td>
+<td><a href="concepts/encryption-path.html">concepts/encryption-path.md</a></td>
+</tr>
+<tr>
+<td>How does the Mac hide the plaintext from its own owner?</td>
+<td><a href="concepts/access-path-elimination.html">concepts/access-path-elimination.md</a></td>
+</tr>
+<tr>
+<td>How does the coordinator know a Mac is genuine and hardened?</td>
+<td><a href="concepts/attestation.html">concepts/attestation.md</a></td>
+</tr>
+<tr>
+<td>How does the coordinator pick a Mac for my request?</td>
+<td><a href="concepts/routing.html">concepts/routing.md</a></td>
+</tr>
+<tr>
+<td>How does the network manage thousands of home Macs?</td>
+<td><a href="concepts/fleet-management.html">concepts/fleet-management.md</a></td>
+</tr>
+<tr>
+<td>How does the money work? Why are payments fair?</td>
+<td><a href="concepts/accounting-and-payments.html">concepts/accounting-and-payments.md</a></td>
+</tr>
+<tr>
+<td>How fast is it? What does it cost? What does it NOT protect?</td>
+<td><a href="concepts/performance-economics-limits.html">concepts/performance-economics-limits.md</a></td>
+</tr>
+<tr>
+<td>Which questions did I not know to ask?</td>
+<td><a href="reference/unknown-unknowns.html">reference/unknown-unknowns.md</a></td>
+</tr>
+<tr>
+<td>Where does the paper differ from the code?</td>
+<td><a href="reference/paper-vs-repo.html">reference/paper-vs-repo.md</a></td>
+</tr>
+</tbody>
+</table></div>
+<h2>Reading order</h2>
+<ol>
+<li>Read <a href="overview/what-is-darkbloom.html">what-is-darkbloom.md</a> for the mental model.</li>
+<li>Read the concept documents in order: encryption path, access path elimination, attestation, routing, fleet management, accounting and payments.</li>
+<li>Read <a href="concepts/performance-economics-limits.html">performance-economics-limits.md</a> for the numbers and the honest limits.</li>
+<li>Read <a href="reference/unknown-unknowns.html">unknown-unknowns.md</a> for the questions the architecture raises but marketing does not answer.</li>
+<li>Read <a href="reference/paper-vs-repo.html">paper-vs-repo.md</a> before you quote the paper. The code moved past the paper in several places.</li>
+</ol>
+<h2>Scope note</h2>
+<p>These documents track the paper <code>papers/dginf-private-inference.tex</code> (1,268 lines) and repository state on 2026-08-27. The repository has its own 92-file documentation set at <code>d-inference/docs/</code> with <code>d-inference/docs/README.md</code> as entry point. These explainer files do not replace that set. They answer one question: how does Darkbloom work.</p>
+<footer>Darkbloom explainer docs &middot; generated from <code>index.md</code> &middot; 2026-08-27</footer>
+</main>
+</body>
+</html>

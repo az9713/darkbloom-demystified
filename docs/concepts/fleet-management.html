@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Fleet Management: Running Inference on Thousands of Home Macs</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0f172a; color: #cbd5e1;
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { color: #e2e8f0; line-height: 1.25; }
+h1 { font-size: 1.9rem; border-bottom: 2px solid #334155; padding-bottom: 12px; }
+h2 { font-size: 1.4rem; margin-top: 2.2em; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
+h3 { font-size: 1.15rem; margin-top: 1.8em; }
+a { color: #2dd4bf; text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #e2e8f0; }
+code { background: #1e293b; color: #fb923c; padding: 2px 6px; border-radius: 4px;
+  font: 0.875em ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: #e2e8f0; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 0.925rem; }
+th, td { border: 1px solid #334155; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #1e293b; color: #e2e8f0; }
+tr:nth-child(even) td { background: rgba(30, 41, 59, 0.45); }
+blockquote { border-left: 3px solid #fb923c; margin: 1em 0; padding: 4px 18px;
+  color: #94a3b8; background: #1e293b; border-radius: 0 8px 8px 0; }
+li { margin: 4px 0; }
+hr { border: none; border-top: 1px solid #334155; margin: 2em 0; }
+footer { margin-top: 60px; color: #94a3b8; font-size: 0.85rem;
+  border-top: 1px solid #1e293b; padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Fleet Management: Running Inference on Thousands of Home Macs</h1>
+<p>The fleet is a swarm of consumer machines in people's homes. They sit behind home routers. They reboot, sleep, update, and disappear without warning. This document explains how the coordinator turns that swarm into a dependable inference service.</p>
+<h2>Joining the fleet</h2>
+<ol>
+<li>The owner runs one command: <code>curl -fsSL https://api.darkbloom.dev/install.sh | bash</code>. The script downloads a signed and notarized bundle, then verifies the SHA-256 hash <strong>and</strong> the code signature before running anything.</li>
+<li>The owner runs <code>darkbloom login</code>. The CLI uses the RFC 8628 device-code flow: it shows a short code, the owner enters the code on the web console, and the machine links to the owner's account.</li>
+<li>The owner installs the combined enrollment profile (<code>darkbloom enroll</code>) for <code>hardware</code> trust — see <a href="attestation.html">attestation.md</a>.</li>
+<li>The owner runs <code>darkbloom start</code>. Other CLI commands: <code>stop</code>, <code>status</code>, <code>doctor</code>, <code>models</code>, <code>benchmark</code>, <code>local</code>, <code>update</code>, <code>verify</code>, <code>logs</code>.</li>
+</ol>
+<h2>Connectivity: the fleet dials out</h2>
+<p>Every provider opens an <strong>outbound</strong> WebSocket to the coordinator. Consequences:</p>
+<ul>
+<li>No port forwarding. No firewall change. No inbound exposure. A Mac behind three layers of home NAT works.</li>
+<li>The coordinator holds the live fleet state in memory (the registry). A restart of the coordinator loses no durable data — providers reconnect and re-register, and reconnect takes &lt; 1 s with exponential backoff (<code>provider-swift/Sources/ProviderCore/Coordinator/ExponentialBackoff.swift</code>, <code>ReachabilityMonitor.swift</code>).</li>
+<li>Reconnection is a security event, not only a network event: it forces fresh registration, a fresh attestation blob, and fresh APNs code attestation.</li>
+</ul>
+<p>All coordinator→provider traffic shares that one socket. A two-lane writer (<code>coordinator/registry/provider_writer.go</code>) gives control frames — attestation challenges, cancels, trust status — strict priority over data frames, with a per-connection write watchdog. A slow stream can never starve a security challenge.</p>
+<h2>Heartbeats: how the coordinator sees the fleet</h2>
+<p>Each provider sends a periodic heartbeat (<code>coordinator/protocol/messages.go:234</code>, <code>HeartbeatMessage</code>) carrying:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Field group</th>
+<th>Content</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Status + <code>active_model</code> + <code>warm_models</code></td>
+<td>What is loaded in memory right now</td>
+<td>Routing to warm capacity</td>
+</tr>
+<tr>
+<td><code>system_metrics</code></td>
+<td>Memory pressure, CPU, GPU utilization, thermal state</td>
+<td>The <code>healthMs</code> cost penalty in <a href="routing.html">routing.md</a></td>
+</tr>
+<tr>
+<td><code>backend_capacity</code></td>
+<td>Engine-reported truth: active token budget used/max, queued budget, per-slot state, observed decode/prefill TPS (EWMA), wedge suspicion</td>
+<td>Token-budget admission — the coordinator admits against the engine's own numbers, never a guess</td>
+</tr>
+<tr>
+<td>Prefix-cache fields</td>
+<td>Which cached prompt prefixes this machine holds</td>
+<td>Cache-aware routing</td>
+</tr>
+</tbody>
+</table></div>
+<p>Stale-heartbeat protection exists because heartbeats lie by omission: after a capacity rejection proves the live gate is refusing, the gray-box budget clamp (<code>coordinator/registry/budget_clamp.go</code>) stops believing the optimistic numbers until a fresh heartbeat arrives.</p>
+<h2>Model distribution: no model bytes in the code</h2>
+<p>The model catalog is data, not code. The coordinator's registry is DB-backed and points at manifests in Cloudflare R2 under <code>https://models.darkbloom.ai</code>. A provider downloads the files a manifest lists and verifies a <strong>per-file SHA-256 plus an aggregate SHA-256</strong>. The <code>ModelScanner</code> discovers local models fast without hashing; <code>WeightHasher.computeHash(for:)</code> computes weight hashes on demand when attestation needs them. A scan-time self-check (<code>TemplateRenderCheck</code>) renders each model's chat template once; a model that fails is marked <code>template_render_ok=false</code> and fenced from routing.</p>
+<h2>Elasticity: warm pool and idle timeout</h2>
+<p>Home machines cannot all hold every model. Two mechanisms move capacity to demand:</p>
+<ul>
+<li><strong>Idle timeout.</strong> A loaded model unloads after 1 hour without requests, freeing the GPU memory. The next request lazy-reloads it (cold start), or the coordinator pre-warms it first.</li>
+<li><strong>Warm-pool controller</strong> (<code>coordinator/registry/warm_pool*.go</code>). It counts pressure events per model — capacity rejects, first-token-deadline misses, cold dispatches, speculative dispatches — folds them into a spill-arrival rate (EWMA, alpha 0.3), and sizes a per-model warm target from that demand (a Little's-Law calculation). It then pushes <code>load_model</code> messages so the right number of Macs hold each model <strong>before</strong> the next request arrives.</li>
+</ul>
+<h2>Living with churn</h2>
+<p>Home machines fail in every way at once. The defenses, layered:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Defense</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mac unplugged or crashed mid-request, before any content</td>
+<td>Pre-content failover: the dispatch loop commits to a provider only on the first content-bearing chunk. Earlier death retries invisibly on another machine.</td>
+</tr>
+<tr>
+<td>Slow first token</td>
+<td>Speculative dispatch: at 50% of the first-token deadline, the request also goes to a backup provider. First token wins; the loser gets a cancel.</td>
+</tr>
+<tr>
+<td>Consumer closes the tab</td>
+<td>Cancel propagates coordinator → provider → engine within 1 s, so no GPU time burns for a dead request.</td>
+</tr>
+<tr>
+<td>A (provider, model) pair that keeps failing</td>
+<td>Shape-keyed inference-error cooldown, dispatch-load cooldown, capacity-reject cooldown — see the gate table in <a href="routing.html">routing.md</a>.</td>
+</tr>
+<tr>
+<td>A sick node that reconnects to wash its record</td>
+<td>Health ejection keyed to stable identity (serial / SE key / account), which survives reconnects.</td>
+</tr>
+<tr>
+<td>Everyone busy</td>
+<td>Queue with a 120 s timeout; 429 with <code>Retry-After</code> at fleet capacity; 503 on exhaustion.</td>
+</tr>
+</tbody>
+</table></div>
+<h2>Throughput on each Mac: continuous batching</h2>
+<p>One Mac serves multiple consumers at once. EngineV2 merges all concurrent requests into <strong>one batched forward pass per step</strong> (continuous batching in MLX-Swift). Measured scaling: batch-of-4 over batch-of-1 gives 3.8× throughput on Qwen and 2.9× on Gemma MoE. Temperature 0 takes a vectorized greedy fast path. Each provider serves up to 4 concurrent requests (validation configuration).</p>
+<h2>Updating a fleet you do not own</h2>
+<p>Providers update themselves; nobody SSHes into anyone's home Mac.</p>
+<ol>
+<li>CI (<code>.github/workflows/release-swift.yml</code>) builds, signs with the Developer ID certificate, notarizes with Apple, computes SHA-256 hashes <strong>after</strong> signing, uploads the bundle to R2, and registers the release with the coordinator via <code>POST /v1/releases</code>.</li>
+<li>Providers fetch updates through the same verified path as installation.</li>
+<li>The coordinator tracks fleet versions (Datadog fleet-version metrics) and enforces version floors per capability — for example, tool-bearing requests route only to providers at <code>tools</code> capability ≥ 0.6.3.</li>
+<li>Old providers degrade gracefully: protocol fields use pointer-typed omission so the coordinator can tell "old provider that cannot say" from "current provider saying an empty set".</li>
+</ol>
+<h2>Why this scales</h2>
+<p>The coordinator does very little per request on the hot path: single-parse frame decode (<code>coordinator/protocol/type_scan.go</code> scans the <code>type</code> key; malformed input falls back to a full envelope decode), memoized per-request X25519 shared keys for chunk decryption (<code>coordinator/api/chunk_key_cache.go</code>, forgotten at request end), and in-memory registry state. The expensive trust work — MDM queries, MDA chains, APNs round-trips — happens at enrollment and on a 5-minute cadence, not per request. Per-request security cost is the 12 ms SIP check on the provider; see <a href="performance-economics-limits.html">performance-economics-limits.md</a>.</p>
+<footer>Darkbloom explainer docs &middot; generated from <code>fleet-management.md</code> &middot; 2026-08-27</footer>
+</main>
+</body>
+</html>

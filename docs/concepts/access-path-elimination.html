@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Access Path Elimination</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0f172a; color: #cbd5e1;
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { color: #e2e8f0; line-height: 1.25; }
+h1 { font-size: 1.9rem; border-bottom: 2px solid #334155; padding-bottom: 12px; }
+h2 { font-size: 1.4rem; margin-top: 2.2em; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
+h3 { font-size: 1.15rem; margin-top: 1.8em; }
+a { color: #2dd4bf; text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #e2e8f0; }
+code { background: #1e293b; color: #fb923c; padding: 2px 6px; border-radius: 4px;
+  font: 0.875em ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: #e2e8f0; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 0.925rem; }
+th, td { border: 1px solid #334155; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #1e293b; color: #e2e8f0; }
+tr:nth-child(even) td { background: rgba(30, 41, 59, 0.45); }
+blockquote { border-left: 3px solid #fb923c; margin: 1em 0; padding: 4px 18px;
+  color: #94a3b8; background: #1e293b; border-radius: 0 8px 8px 0; }
+li { margin: 4px 0; }
+hr { border: none; border-top: 1px solid #334155; margin: 2em 0; }
+footer { margin-top: 60px; color: #94a3b8; font-size: 0.85rem;
+  border-top: 1px solid #1e293b; padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Access Path Elimination</h1>
+<p>The provider's Mac owner has root. This document explains why root is not enough to read the plaintext, and where the guarantee's edges are.</p>
+<h2>The design move: remove paths, don't encrypt memory</h2>
+<p>Apple Silicon cannot encrypt main memory for third-party code. So Darkbloom enumerates every software mechanism through which the owner could observe the inference data, and closes each one. Apple used the same philosophy for Private Cloud Compute — remove the shell, the debugger, the persistent storage — but Apple owns those servers. Darkbloom applies it against the machine's own owner.</p>
+<h2>Step 1: put everything in one process</h2>
+<p>Traditional serving stacks (vLLM, Ollama, llama.cpp) run the engine as a separate server process. That creates two attack surfaces:</p>
+<ol>
+<li>Localhost TCP between the front end and the engine — capturable with <code>tcpdump</code>, which works even with SIP enabled.</li>
+<li>The engine binary — replaceable with a version that logs requests.</li>
+</ol>
+<p>Darkbloom removes both by running <code>mlx-swift-lm</code> <strong>inside</strong> the hardened Swift process. Model weights (up to 76 GB for a 122B-parameter model at 4-bit quantization), tokenizer, all intermediate activations, the WebSocket client, and the X25519 decryption key share one address space. There is no subprocess, no local server, no socket, and no pipe <strong>on the data path</strong> — the only subprocesses the provider spawns are security checks like <code>csrutil status</code>, which never touch request data. The engine runs on the GPU through Metal, still in-process.</p>
+<p><strong>Scope note.</strong> This claim holds for the coordinator-routed private path. <code>darkbloom start --local</code> (standalone mode) deliberately runs a local Hummingbird HTTP server (<code>provider-swift/Sources/ProviderCore/Server/StandaloneServer.swift</code>) serving <code>/v1/chat/completions</code> on the owner's own machine for the owner's own traffic. That mode is outside the privacy boundary by design — the owner is the user there.</p>
+<h2>Step 2: make the process memory unreadable</h2>
+<p>Three kernel-enforced mechanisms close the remaining software paths:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>What it blocks</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ptrace(PT_DENY_ATTACH)</code> — constant 31, called at startup before any sensitive data loads</td>
+<td><code>lldb</code>, <code>dtrace</code>, Instruments; permanent for process lifetime; applies to root too</td>
+<td><code>provider-swift/Sources/ProviderCore/Security/AntiDebug.swift</code>. The process <strong>refuses to start</strong> if the call fails.</td>
+</tr>
+<tr>
+<td>Hardened Runtime, signed without <code>com.apple.security.get-task-allow</code></td>
+<td><code>task_for_pid()</code> and <code>mach_vm_read()</code> from any external process</td>
+<td>Code signature; entitlements in <code>scripts/entitlements.plist</code></td>
+</tr>
+<tr>
+<td>SIP</td>
+<td>Root bypass of the two above; unsigned kernel extensions; modification of protected system binaries</td>
+<td>macOS kernel</td>
+</tr>
+</tbody>
+</table></div>
+<p>Supporting hardening in the same module:</p>
+<ul>
+<li><strong>Core dumps off</strong>: <code>RLIMIT_CORE = 0</code> (<code>AntiDebug.swift</code>, <code>disableCoreDumps()</code>). A crash writes no file containing prompts, weights, or keys.</li>
+<li><strong>Debugger detection</strong>: a <code>sysctl</code> check for the <code>P_TRACED</code> flag, as a second net in case <code>PT_DENY_ATTACH</code> were ever bypassed.</li>
+<li><strong>Environment scrubbing</strong>: <code>Security/EnvironmentScrubber.swift</code>.</li>
+<li><strong>Buffer zeroing</strong>: after each request, buffers holding prompts and outputs are cleared with <code>memset_s</code> (<code>Security/SecurityHardening.swift:267</code>) — chosen because C11 Annex K guarantees the compiler cannot optimize the call away.</li>
+</ul>
+<p>The coordinator does not take the provider's word for any of this: <code>AntiDebugEnabled</code>, <code>CoreDumpsDisabled</code>, and <code>EnvScrubbed</code> are required capabilities at the routing chokepoint (<code>coordinator/registry/registry.go:926</code>).</p>
+<p><strong>Can plaintext reach the SSD through the virtual-memory system?</strong> The honest answer per path: <em>swap</em> — the code takes no <code>mlock</code>-style step to pin sensitive buffers; the actual mitigation is that macOS encrypts swap by default. <em>Sleep/hibernation</em> — the provider self-caffeinates while serving (<code>ProviderCore/.../AttestationReadiness.swift:126-133</code>), which narrows but does not remove the window. <em>GPU memory reuse</em> — freed Metal allocations are not separately scrubbed before reuse. None of these is a demonstrated leak; all three sit one class below the kernel-enforced guarantees above, and the docs state them so the boundary is exact.</p>
+<h2>Step 3: prove the protections cannot turn off mid-flight</h2>
+<p>Everything above depends on SIP. The paper proves the key property as Theorem 1 (SIP Runtime Immutability):</p>
+<ol>
+<li>SIP state lives in NVRAM and is read by the Boot ROM during secure boot (Lemma 1).</li>
+<li>The only tool that changes it is <code>csrutil</code>, and Apple restricts <code>csrutil disable</code> to the Recovery Mode boot environment. In normal macOS it returns an error. SIP protects the NVRAM variables that control SIP — a self-reinforcing property.</li>
+<li>Reaching Recovery Mode requires a reboot. A reboot terminates every process — including the provider process, which erases its in-memory key.</li>
+</ol>
+<p>Therefore: if SIP is verified enabled when the process starts, SIP is enabled for that process's entire lifetime. The corollary: one startup check suffices. The production code still checks per request (12 ms, dominated by the <code>csrutil status</code> subprocess call) as defense-in-depth.</p>
+<p>The same reboot logic closes the "lie and reconnect" hole: a reboot drops the WebSocket; reconnection forces fresh registration, a fresh attestation blob, and fresh code attestation. If the new blob reports SIP disabled, the provider is rejected. If the provider lies, the next MDM <code>SecurityInfo</code> query — answered by the OS, not by provider software — reveals the truth. See <a href="attestation.html">attestation.md</a>.</p>
+<h2>The complete software attack surface</h2>
+<p>The paper enumerates it; each row is blocked under the stated assumptions:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Attack</th>
+<th>Defense</th>
+<th>Enforced by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Attach debugger (lldb, dtrace, Instruments)</td>
+<td><code>ptrace(PT_DENY_ATTACH)</code> at startup</td>
+<td>Kernel</td>
+</tr>
+<tr>
+<td>Read memory via <code>task_for_pid</code> / <code>mach_vm_read</code></td>
+<td>Hardened Runtime without <code>get-task-allow</code></td>
+<td>Kernel</td>
+</tr>
+<tr>
+<td>Intercept IPC</td>
+<td>No IPC exists — inference is in-process</td>
+<td>Architecture</td>
+</tr>
+<tr>
+<td>Modify the provider binary to add logging</td>
+<td>Code signing + SIP: macOS refuses modified signed binaries</td>
+<td>Kernel + SIP</td>
+</tr>
+<tr>
+<td>Replace the binary with a fork</td>
+<td>APNs code-identity attestation — only the genuine team-signed app receives the push challenge</td>
+<td>Coordinator + Apple</td>
+</tr>
+<tr>
+<td>Inject a malicious runtime package</td>
+<td>No embedded interpreter; the Swift binary links only signed <code>mlx-swift-lm</code></td>
+<td>Process + SIP</td>
+</tr>
+<tr>
+<td>Load an unsigned kernel extension</td>
+<td>SIP blocks all unsigned kexts on Apple Silicon</td>
+<td>SIP</td>
+</tr>
+<tr>
+<td>Patch the kernel at runtime</td>
+<td>Kernel Integrity Protection — hardware denies writes to kernel pages after boot</td>
+<td>Hardware</td>
+</tr>
+<tr>
+<td>Disable SIP</td>
+<td>Requires a Recovery reboot, which kills the process (Theorem 1)</td>
+<td>Hardware</td>
+</tr>
+<tr>
+<td>Read <code>/dev/mem</code></td>
+<td>The device node does not exist on Apple Silicon</td>
+<td>Hardware</td>
+</tr>
+<tr>
+<td>DMA via Thunderbolt/PCIe</td>
+<td>Per-device IOMMU (DART), default-deny; unauthorized DMA panics the kernel</td>
+<td>Hardware</td>
+</tr>
+<tr>
+<td>RDMA over Thunderbolt 5 (80 Gb/s)</td>
+<td>Reported in challenge-response; single-node inference is today's supported boundary; hypervisor Stage-2 isolation validated but not enforced</td>
+<td>Hardware + policy</td>
+</tr>
+<tr>
+<td><strong>Physical memory probing</strong></td>
+<td><strong>Not defended.</strong> LPDDR5x is soldered into the SoC package; desoldering is destructive. This is the accepted residual attack — the same one Apple PCC accepts.</td>
+<td>—</td>
+</tr>
+</tbody>
+</table></div>
+<h2>The assumptions, stated honestly</h2>
+<p>The guarantee holds under three assumptions from the paper's threat model:</p>
+<ol>
+<li><strong>Kernel integrity</strong> — no unpatched macOS kernel vulnerability bypasses SIP, Hardened Runtime, or KIP. Apple patched known SIP-bypass CVEs (CVE-2022-22583, CVE-2022-42821, CVE-2023-32369) within weeks. A zero-day breaks the model. Only hardware TEEs are immune to this class.</li>
+<li><strong>Secure Enclave integrity</strong> — the SE correctly isolates its keys. Analogous to trusting Intel SGX or ARM TrustZone.</li>
+<li><strong>Apple attestation CA integrity</strong> — Apple's Enterprise Attestation Root CA key is not compromised. Analogous to trusting any Web PKI CA.</li>
+</ol>
+<p>What is <strong>not</strong> protected even with all assumptions holding: token timing. The owner sees packets leave. Packet intervals reveal approximate prompt length, response length, and generation difficulty. See <a href="performance-economics-limits.html">performance-economics-limits.md</a>.</p>
+<footer>Darkbloom explainer docs &middot; generated from <code>access-path-elimination.md</code> &middot; 2026-08-27</footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Key Concepts</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0f172a; color: #cbd5e1;
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { color: #e2e8f0; line-height: 1.25; }
+h1 { font-size: 1.9rem; border-bottom: 2px solid #334155; padding-bottom: 12px; }
+h2 { font-size: 1.4rem; margin-top: 2.2em; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
+h3 { font-size: 1.15rem; margin-top: 1.8em; }
+a { color: #2dd4bf; text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #e2e8f0; }
+code { background: #1e293b; color: #fb923c; padding: 2px 6px; border-radius: 4px;
+  font: 0.875em ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: #e2e8f0; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 0.925rem; }
+th, td { border: 1px solid #334155; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #1e293b; color: #e2e8f0; }
+tr:nth-child(even) td { background: rgba(30, 41, 59, 0.45); }
+blockquote { border-left: 3px solid #fb923c; margin: 1em 0; padding: 4px 18px;
+  color: #94a3b8; background: #1e293b; border-radius: 0 8px 8px 0; }
+li { margin: 4px 0; }
+hr { border: none; border-top: 1px solid #334155; margin: 2em 0; }
+footer { margin-top: 60px; color: #94a3b8; font-size: 0.85rem;
+  border-top: 1px solid #1e293b; padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Key Concepts</h1>
+<p>Every term that the other documents use without explanation. One term, one meaning.</p>
+<p><strong>Consumer</strong> — the party that sends an inference request. Trusted; it is their own data.</p>
+<p><strong>Coordinator</strong> — the Go control plane at <code>api.darkbloom.dev</code>. It authenticates, routes, bills, verifies attestations, and relays encrypted payloads. The design places it in a Confidential VM; production today runs AMD SEV (see <strong>Confidential VM</strong> below).</p>
+<p><strong>Provider</strong> — an Apple Silicon Mac that serves inference, run by an independent owner. The threat model assumes the owner is adversarial: root access, physical custody, active attempts to read the data.</p>
+<p><strong>Confidential VM (CVM)</strong> — a virtual machine whose memory is encrypted by the CPU. The paper specifies AMD SEV-SNP (memory encryption + integrity + guest attestation reports). Production reality: the deploy runbook (<code>d-inference/docs/operations/coordinator-deploy.md</code>) reports the VM as AMD <strong>SEV</strong> with maintenance policy <code>MIGRATE</code>, and states "Do not claim SEV-SNP for this VM." SEV encrypts guest memory against the cloud host but, unlike SEV-SNP, gives no memory integrity and no guest attestation report — and it never protects against root <strong>inside</strong> the guest.</p>
+<p><strong>NaCl Box</strong> — the encryption construction used on every hop: X25519 key agreement + XSalsa20-Poly1305 authenticated encryption. Wire format: <code>24-byte nonce || 16-byte Poly1305 tag || ciphertext</code>. Go uses <code>golang.org/x/crypto/nacl/box</code>; Swift uses libsodium (swift-sodium); a Rust <code>crypto_box</code> reference implementation verifies cross-language interop in <code>coordinator/internal/e2e/cross_compat_test.go</code>.</p>
+<p><strong>Hop-by-hop encryption</strong> — Darkbloom's actual model, as opposed to strict end-to-end. Plaintext exists transiently inside the coordinator's CVM memory for routing and billing, then is re-sealed to the provider. See <a href="../concepts/encryption-path.html">../concepts/encryption-path.md</a>.</p>
+<p><strong>Ephemeral key</strong> — a fresh X25519 key pair the coordinator generates for every single request. This gives forward secrecy: compromise of one key opens one request.</p>
+<p><strong>MLX / mlx-swift-lm</strong> — Apple's array framework for Apple Silicon and the Swift LLM library built on it (fork maintained at <code>d-inference/libs/mlx-swift-lm</code>). Darkbloom runs it inside the provider process, on the GPU via Metal.</p>
+<p><strong>In-process inference</strong> — the model, tokenizer, weights (up to 76 GB for a 122B-parameter model at 4-bit), and the decryption key all live in one process address space. No subprocess, no localhost server, no IPC — so <code>tcpdump</code> and binary swapping find nothing to attack.</p>
+<p><strong>SIP (System Integrity Protection)</strong> — the macOS mechanism that stops root from modifying <code>/System</code>, loading unsigned kernel extensions, or bypassing Hardened Runtime. Its state lives in NVRAM and can change only from Recovery Mode, which requires a reboot.</p>
+<p><strong>Hardened Runtime</strong> — a code-signing mode. Signed without the <code>com.apple.security.get-task-allow</code> entitlement, the kernel denies <code>task_for_pid()</code> and <code>mach_vm_read()</code> against the process from any other process.</p>
+<p><strong><code>PT_DENY_ATTACH</code></strong> — <code>ptrace</code> request constant 31. Called at startup, it makes the kernel permanently deny debugger attachment to the process, including from root. Implemented in <code>provider-swift/Sources/ProviderCore/Security/AntiDebug.swift</code>.</p>
+<p><strong>KIP (Kernel Integrity Protection)</strong> — Apple Silicon hardware that denies writes to kernel code pages after boot.</p>
+<p><strong>ARV (Authenticated Root Volume)</strong> — the sealed system volume: a Merkle tree of SHA-256 hashes over every system file. Any modification breaks the seal.</p>
+<p><strong>Secure Enclave (SE)</strong> — Apple's isolated security coprocessor. Darkbloom uses it to generate a P-256 ECDSA signing key that never leaves the hardware. This key signs the attestation blob, challenge responses, and code-identity nonces.</p>
+<p><strong>Attestation blob</strong> — a JSON document of 15 fields (alphabetical order, deterministic encoding) that the SE key signs: <code>sipEnabled</code>, <code>secureBootEnabled</code>, <code>serialNumber</code>, <code>binaryHash</code>, <code>encryptionPublicKey</code>, <code>systemVolumeHash</code>, and others. Verified in <code>coordinator/attestation/attestation.go:132</code>.</p>
+<p><strong>MDM (Mobile Device Management)</strong> — Apple's device-management framework. Darkbloom runs MicroMDM and uses exactly three permissions (<code>AccessRights = 1041</code>: bits 0, 4, 10) to query — never to control — the device.</p>
+<p><strong>MDA (Managed Device Attestation)</strong> — an Apple service that returns an Apple-signed X.509 certificate chain proving the device is genuine hardware, with device properties encoded as OIDs under prefix <code>1.2.840.113635</code>.</p>
+<p><strong>APNs code-identity attestation</strong> — Darkbloom's replacement for the missing App Attest on macOS (v0.6.0+). Apple's push infrastructure only delivers to a process whose signature, App ID (<code>io.darkbloom.provider</code>), and provisioning profile check out — enforced by AMFI (<code>AppleMobileFileIntegrity.kext</code>). The coordinator pushes an encrypted nonce; only the genuine binary can receive and decrypt it. See <a href="../concepts/attestation.html">../concepts/attestation.md</a>.</p>
+<p><strong>Trust tier</strong> — the consumer-selectable minimum verification level per request: <code>none</code>, <code>self_signed</code>, <code>hardware</code>. Production enforces <code>hardware</code>. Private text traffic additionally requires code attestation once enforcement is on.</p>
+<p><strong>Self-route</strong> — the header <code>X-Darkbloom-Route: self</code> restricts routing to machines the caller's account owns. Free, encrypted, no fallback to the paid fleet. <code>X-Darkbloom-Route: prefer</code> tries owned machines first, then falls back.</p>
+<p><strong>Routing gates</strong> — the eligibility checks in <code>coordinator/registry/scheduler.go:1119</code> (<code>providerPassesRoutingGatesLockedEx</code>) that a provider must clear before the cost scheduler considers it.</p>
+<p><strong>Privacy chokepoint</strong> — <code>providerSupportsPrivateTextLocked</code> at <code>coordinator/registry/registry.go:926</code>: the single function through which every private-text routing decision passes. No self-route exemption exists at this gate.</p>
+<p><strong>Challenge-response</strong> — every 5 minutes the coordinator sends a random 32-byte nonce; the provider re-checks SIP, Secure Boot, and RDMA status, signs <code>nonce || timestamp || publicKey</code> with the SE key, and must answer within 30 seconds. A report of disabled SIP or Secure Boot causes immediate untrust with no grace period.</p>
+<p><strong>RDMA over Thunderbolt 5</strong> — a macOS 26.2+ feature that lets a physically connected Mac read host memory at 80 Gb/s via DMA, bypassing all software protections. Off by default; enabling it requires a Recovery OS boot. Today Darkbloom records RDMA status as telemetry; a hard hypervisor gate is planned, not shipped.</p>
+<p><strong>MoE (Mixture-of-Experts)</strong> — a model architecture where only a small "active" subset of parameters (e.g. 3B of 35B) computes each token. On bandwidth-bound consumer hardware only active weights cross the memory bus, which is why MoE models dominate Darkbloom's economics.</p>
+<p><strong>Heartbeat</strong> — the periodic provider→coordinator message carrying status, loaded models, live system metrics, and engine-reported token-budget capacity (<code>coordinator/protocol/messages.go:234</code>). The coordinator's whole live view of the fleet is built from heartbeats plus challenge results.</p>
+<p><strong>Warm pool</strong> — the controller (<code>coordinator/registry/warm_pool*.go</code>) that watches per-model demand pressure and pushes <code>load_model</code> messages so enough Macs hold each model before the next request needs it.</p>
+<p><strong>Continuous batching</strong> — one Mac merges all concurrent requests into a single batched forward pass per step. Measured scaling: batch-of-4 gives 3.8× the throughput of batch-of-1 on Qwen, 2.9× on Gemma MoE.</p>
+<p><strong>Micro-USD</strong> — the ledger unit: 1 USD = 1,000,000 micro-USD, integer arithmetic only. Every deposit, charge, refund, payout, and reward is a ledger entry in this unit.</p>
+<p><strong>Reservation</strong> — the pre-flight hold on a consumer's balance (estimated cost) before dispatch. Settlement charges the exact reported usage, refunds the difference, and caps any overage at 2× the reservation.</p>
+<p><strong>Base rewards</strong> — pool-bounded additive income for eligible providers, tiered by verified memory ($10/24 GB up to $40/512 GB per month, $18/64 GB as the anchor), settled in 5-minute periods even when the network is quiet. Design: <code>d-inference/docs/base-rewards.md</code>.</p>
+<footer>Darkbloom explainer docs &middot; generated from <code>key-concepts.md</code> &middot; 2026-08-27</footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>The Five Attestation Layers</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0f172a; color: #cbd5e1;
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { color: #e2e8f0; line-height: 1.25; }
+h1 { font-size: 1.9rem; border-bottom: 2px solid #334155; padding-bottom: 12px; }
+h2 { font-size: 1.4rem; margin-top: 2.2em; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
+h3 { font-size: 1.15rem; margin-top: 1.8em; }
+a { color: #2dd4bf; text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #e2e8f0; }
+code { background: #1e293b; color: #fb923c; padding: 2px 6px; border-radius: 4px;
+  font: 0.875em ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: #e2e8f0; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 0.925rem; }
+th, td { border: 1px solid #334155; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #1e293b; color: #e2e8f0; }
+tr:nth-child(even) td { background: rgba(30, 41, 59, 0.45); }
+blockquote { border-left: 3px solid #fb923c; margin: 1em 0; padding: 4px 18px;
+  color: #94a3b8; background: #1e293b; border-radius: 0 8px 8px 0; }
+li { margin: 4px 0; }
+hr { border: none; border-top: 1px solid #334155; margin: 2em 0; }
+footer { margin-top: 60px; color: #94a3b8; font-size: 0.85rem;
+  border-top: 1px solid #1e293b; padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+<h1>The Five Attestation Layers</h1>
+<p>Encryption to the provider's key is only as good as the answer to one question: <strong>is that key held by a genuine, hardened, unmodified Darkbloom process on genuine Apple hardware?</strong> No single signal can answer it, because most signals are reported by the party under suspicion. Darkbloom layers five independent checks, each covering a hole the others leave.</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Mechanism</th>
+<th>What it proves</th>
+<th>What it cannot prove</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Secure Enclave P-256 signature</td>
+<td>A hardware-bound identity signed this exact self-report</td>
+<td>That the report is true; that the key is really in the SE</td>
+</tr>
+<tr>
+<td>2</td>
+<td>MDM <code>SecurityInfo</code></td>
+<td>The <strong>OS</strong> — not provider software — reports SIP, Secure Boot, ARV</td>
+<td>That the device is genuine Apple hardware</td>
+</tr>
+<tr>
+<td>3</td>
+<td>MDA-over-MDM</td>
+<td>Apple's CA signs: genuine hardware, serial, UDID, SepOS, SIP, Secure Boot</td>
+<td>Which binary is running</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Challenge-response every 5 min</td>
+<td>The posture is still good <strong>now</strong>, and the key is live</td>
+<td>Which binary is running</td>
+</tr>
+<tr>
+<td>5</td>
+<td>APNs code identity (v0.6.0+)</td>
+<td>The running binary is the genuine team-signed build</td>
+<td>Device posture (still needs 2+3)</td>
+</tr>
+</tbody>
+</table></div>
+<h2>Layer 1 — Secure Enclave attestation</h2>
+<p>On first run the provider generates a P-256 ECDSA key inside the Secure Enclave via CryptoKit (<code>provider-swift/Sources/ProviderCore/Security/SecureEnclaveIdentity.swift</code>, <code>PersistentEnclaveKey.swift</code>). The private key never leaves the SE; the <code>dataRepresentation</code> stored on disk is an opaque handle that only works on the device that created it.</p>
+<p>The provider signs an attestation blob of 15 JSON fields in alphabetical order — among them <code>sipEnabled</code>, <code>secureBootEnabled</code>, <code>secureEnclaveAvailable</code>, <code>serialNumber</code>, <code>binaryHash</code>, <code>encryptionPublicKey</code>, <code>systemVolumeHash</code>, <code>rdmaDisabled</code>, <code>timestamp</code>. Three fields do structural work:</p>
+<ul>
+<li><strong><code>serialNumber</code></strong> bridges to Layers 2 and 3: the coordinator uses it to find the MDM enrollment record and cross-check independently.</li>
+<li><strong><code>encryptionPublicKey</code></strong> binds the X25519 key from <a href="encryption-path.html">encryption-path.md</a> to this SE identity. The coordinator verifies it matches the registration message — proof that the signing device and the decrypting process are the same machine.</li>
+<li><strong><code>binaryHash</code></strong> (SHA-256 of the running binary) is <strong>deliberately not a trust gate</strong>. It is self-reported by the possibly-adversarial measurer, so a fork would just report the blessed hash. Since v0.6.0 it serves only drift telemetry and transparency-log matching; Layer 5 carries the real code-identity proof.</li>
+</ul>
+<p><strong>The cross-language trap.</strong> Swift signs; Go verifies; both must see byte-identical JSON. Swift escapes <code>/</code> as <code>\/</code>; Go does not. So the coordinator verifies against the <strong>original raw bytes</strong> (<code>json.RawMessage</code>), never a re-encode (<code>coordinator/attestation/attestation.go:132</code>; the <code>marshalSortedJSON</code> re-encode exists only as a fallback for Go-generated test blobs). Verification enforces: valid DER-encoded ECDSA signature over SHA-256 of the blob; <code>secureEnclaveAvailable</code>, <code>sipEnabled</code>, <code>secureBootEnabled</code> all true; timestamp fresh; <code>encryptionPublicKey</code> matching. <code>AuthenticatedRootEnabled</code> is logged, not enforced — multi-boot Macs and older macOS report it unreliably.</p>
+<h2>Layer 2 — MDM independent verification</h2>
+<p>Layer 1 has two holes: the coordinator cannot tell an SE-resident key from a software key (identical ECDSA output), and the blob's SIP field comes from <code>csrutil status</code>, a software check. Layer 2 asks the OS instead. The device enrolls with MicroMDM; the coordinator sends the <code>SecurityInfo</code> command, and the OS MDM client answers with <code>SIPEnabled</code>, <code>SecureBootLevel</code>, <code>AuthRootVolume</code>, <code>FDE_Enabled</code>, <code>RecoveryLock</code>, <code>FirewallEnabled</code>. Requirements: SIP enabled, Secure Boot "full", Authenticated Root Volume enabled. Any discrepancy against the self-report is immediate rejection.</p>
+<p><strong>The helpful circularity</strong> (paper Proposition 1): to make MDM report a false "SIP enabled", the owner would have to modify system frameworks in <code>/System/Library/</code> — which requires SIP to be disabled, which ARV would also expose (the sealed system volume's Merkle root would change). The lie requires the very state it denies.</p>
+<p><strong>Minimal permissions.</strong> The enrollment profile sets <code>AccessRights = 1041</code> = 2^0 + 2^4 + 2^10: inspect device, query device information, query security information. The other 10 bits — including erase (bit 3), lock, profile/app install, settings changes — are unset. The coordinator can only ask questions. Owners can unenroll any time in System Settings, which removes profile and certificates completely.</p>
+<p>Enrollment is one signed <code>.mobileconfig</code> combining three payloads — SCEP (RSA-2048 device identity), MDM, and an ACME <code>device-attest-01</code> payload. The ACME payload is <strong>inactive</strong>: its hardware-bound key lands in a platform-restricted keychain third-party apps cannot use, and its leaf certificate lacks the SIP/SecureBoot OIDs. It is retained for future transport-layer use only.</p>
+<h2>Layer 3 — MDA: Apple signs the hardware</h2>
+<p>Layers 1–2 verify posture, not provenance. Layer 3 asks Apple. The coordinator sends the MDM <code>DeviceInformation</code> command with <code>DevicePropertiesAttestation</code>; the device contacts Apple's attestation servers and returns a DER X.509 chain: leaf → Apple Enterprise Attestation Sub CA 1 (P-384) → Apple Enterprise Attestation Root CA (P-384, valid until 2047). The leaf encodes properties as OIDs under <code>1.2.840.113635</code>: serial (<code>100.8.9.1</code>), UDID (<code>100.8.9.2</code>), OS version, SepOS version, LLB version, SIP status (<code>100.8.13.1</code>), Secure Boot (<code>100.8.13.2</code>), kext policy, and a freshness code (<code>100.8.11.1</code>).</p>
+<p><strong>The binding trick.</strong> The coordinator sets <code>DeviceAttestationNonce = SHA-256(SE public key)</code>. Apple embeds that hash in the leaf's <code>FreshnessCode</code> OID. When the returned code matches the hash of the key the coordinator already accepted, the Layer-1 signing key is cryptographically chained to Apple-attested genuine hardware. Verification lives in <code>coordinator/attestation/mda.go</code>. Forging Layer 3 requires compromising Apple's CA; forging Layer 2 "only" requires a SIP bypass.</p>
+<h2>Layer 4 — continuous challenge-response</h2>
+<p>Enrollment-time trust decays. Every 5 minutes (and immediately at registration) the coordinator sends a random 32-byte nonce. The provider re-checks SIP (<code>csrutil status</code>), Secure Boot, and RDMA (<code>rdma_ctl status</code>), signs <code>nonce || timestamp || publicKey</code> with the SE key, and must respond within 30 seconds (<code>provider-swift/Sources/ProviderCore/ProviderLoop+AttestationChallenge.swift</code>).</p>
+<p>Policy: SIP or Secure Boot reported disabled → <strong>immediate untrust, no grace period</strong> — by Theorem 1 that state proves a deliberate weakened-security reboot. Three consecutive signature failures → untrust (distinguishes flaky networks from replaced machines). RDMA status is recorded as telemetry, not yet enforced (hypervisor reporting is retired in current providers; the coordinator still decodes it so older &lt; v0.6.31 signed payloads verify). Challenge freshness is itself a routing gate: a provider whose last verified challenge is too old receives no traffic.</p>
+<h2>Layer 5 — APNs code identity</h2>
+<p>The remaining gap after Layers 1–4: a fork of the provider that logs prompts could still present a valid SE key and a valid MDA chain — those attest the <em>device</em>, not the <em>code</em>. macOS offers no App Attest (<code>DCAppAttestService.isSupported</code> is <code>false</code>), and <code>binaryHash</code> is self-reported. Darkbloom's answer repurposes Apple's push infrastructure as a non-self-reportable code-identity oracle.</p>
+<p>Only a process meeting three conditions can receive a push for topic <code>io.darkbloom.provider</code>: signed with Darkbloom's Developer ID team certificate; carrying App ID <code>io.darkbloom.provider</code>; authorized by an Apple-signed provisioning profile with the <code>aps-environment</code> entitlement. AMFI (<code>AppleMobileFileIntegrity.kext</code> + <code>amfid</code>) enforces all three at launch, before the process may register for push at all. A patched binary, a re-signed binary, or a different Team ID cannot obtain a device token for the topic.</p>
+<p>Protocol (<code>coordinator/apns/attestor.go</code>; payload built at <code>attestor.go:307</code>; provider side <code>ProviderCore/Apns/APNsBridge.swift</code>):</p>
+<ol>
+<li>At registration the provider sends its APNs device token <code>T</code> with its X25519 key <code>K</code> and SE key.</li>
+<li>The coordinator generates a fresh 32-byte nonce, encrypts it to <code>K</code> with NaCl Box, and pushes the ciphertext to <code>T</code> over Apple's HTTP/2 push service.</li>
+<li>Only the genuine binary receives the push; it decrypts with <code>K</code>, signs the nonce with the SE key, and returns both over the WebSocket.</li>
+<li>On verification the connection is marked <code>CodeAttested</code> — per-connection, in-memory. Reconnecting forces re-attestation; a SIP-downgrade reboot necessarily drops the WebSocket.</li>
+</ol>
+<p>Limits: background push is best-effort and budget-throttled (the coordinator can switch to alert mode); APNs requires a logged-in macOS GUI Aqua session, so headless Macs fail closed for private traffic; APNs proves App ID/Team ID, not the exact version — version pinning awaits reproducible builds plus a public transparency log of blessed <code>cdhash</code> values.</p>
+<h2>What attests the model, not just the machine</h2>
+<p>The five layers prove the machine and the binary. The <strong>model weights</strong> have their own, weaker chain: the provider verifies per-file and aggregate SHA-256 hashes when downloading from the registry (<code>https://models.darkbloom.ai</code>), and reports weight hashes upward — but the reporter is the provider, made trustworthy only by Layer 5, and the coordinator's weight-hash verification is <strong>currently fail-open</strong> (<code>d-inference/docs/threat-model.yaml</code>, SEC-007: a substituted model may be served without detection). Runtime-manifest verification (<code>RuntimeVerified</code> at the chokepoint below) covers the runtime, not the weights. Consumers get download-integrity plus code-attested reporting — not an independent cryptographic proof of which weights ran. See <a href="../reference/unknown-unknowns.html">../reference/unknown-unknowns.md</a>, entry 1.</p>
+<h2>Where it all converges: the routing chokepoint</h2>
+<p><code>providerSupportsPrivateTextLocked</code> (<code>coordinator/registry/registry.go:926</code>) is the single function every private-text routing decision passes. It requires <strong>all</strong> of: an attested X25519 key; backend <code>mlx-swift</code> (the legacy Python backend is unroutable); encrypted response chunks; a verified runtime manifest (reported hashes match the known-good manifest); <code>ChallengeVerifiedSIP</code> — the coordinator-verified value, explicitly not the self-reported field; <code>CodeAttested</code> once the enforcement deadline passes (a live-policy check, so the grace→enforce flip needs no reconnects); and the capability flags <code>TextBackendInprocess</code>, <code>TextProxyDisabled</code>, <code>AntiDebugEnabled</code>, <code>CoreDumpsDisabled</code>, <code>EnvScrubbed</code>.</p>
+<p>There is no self-route exemption at this gate. The owner's own machine clears the same bar.</p>
+<p>Consumers can audit the result: <code>GET /v1/providers/attestation</code> exposes privacy-redacted trust status including the Apple MDA chains, verifiable against Apple's public root CA. Serials, UDIDs, and raw certificates stay private.</p>
+<footer>Darkbloom explainer docs &middot; generated from <code>attestation.md</code> &middot; 2026-08-27</footer>
+</main>
+</body>
+</html>

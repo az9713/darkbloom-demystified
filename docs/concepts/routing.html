@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Routing: How the Coordinator Picks a Mac</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0f172a; color: #cbd5e1;
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { color: #e2e8f0; line-height: 1.25; }
+h1 { font-size: 1.9rem; border-bottom: 2px solid #334155; padding-bottom: 12px; }
+h2 { font-size: 1.4rem; margin-top: 2.2em; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
+h3 { font-size: 1.15rem; margin-top: 1.8em; }
+a { color: #2dd4bf; text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #e2e8f0; }
+code { background: #1e293b; color: #fb923c; padding: 2px 6px; border-radius: 4px;
+  font: 0.875em ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: #e2e8f0; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 0.925rem; }
+th, td { border: 1px solid #334155; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #1e293b; color: #e2e8f0; }
+tr:nth-child(even) td { background: rgba(30, 41, 59, 0.45); }
+blockquote { border-left: 3px solid #fb923c; margin: 1em 0; padding: 4px 18px;
+  color: #94a3b8; background: #1e293b; border-radius: 0 8px 8px 0; }
+li { margin: 4px 0; }
+hr { border: none; border-top: 1px solid #334155; margin: 2em 0; }
+footer { margin-top: 60px; color: #94a3b8; font-size: 0.85rem;
+  border-top: 1px solid #1e293b; padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Routing: How the Coordinator Picks a Mac</h1>
+<p>Routing runs in two stages. First a gate function removes every ineligible provider. Then a cost function ranks the survivors and the cheapest wins.</p>
+<h2>Stage 1 — the gates</h2>
+<p><code>providerPassesRoutingGatesLockedEx</code> (<code>coordinator/registry/scheduler.go:1119</code>) is the single source of truth. The dispatch hot path and the capacity preflight (<code>QuickCapacityCheck</code>) both call it, so they can never disagree — a prior bug had the preflight promising capacity that routing then refused. Gates, in evaluation order:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Gate</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Catalog membership</td>
+<td>The provider advertises an allowed build of the requested model. Dedicated-family boxes (e.g. Gemma-only) accept only their family.</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Dispatch-load cooldown</td>
+<td>The pair recently failed a model load with "insufficient memory" — a retry would instant-503 again.</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Inference-error cooldown, <strong>shape-keyed</strong></td>
+<td>Repeated provider-side 5xx for this request shape (e.g. a deterministic chat-template crash on tool schemas) quarantines the (provider, model, shape) triple. Shape-keying keeps a tool failure from derouting clean text traffic. Cleared by a same-shape success or TTL.</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Capacity-reject cooldown</td>
+<td>The pair keeps capacity-rejecting with zero interleaved accepts — the black-hole signature of an engine misreporting its token budget. A busy box that also serves never trips it.</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Node-health breaker + health ejection</td>
+<td>A node fault-erroring on ~all requests is derouted fleet-wide; the ejection variant keys on stable identity (serial/SE-key/account) so reconnect-loops cannot wash the record. A fail-open rescan pass exists so a bad fleet-wide rollout cannot deroute every provider at once.</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Status</td>
+<td>Not <code>offline</code>, not <code>untrusted</code>.</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Private-only admission</td>
+<td>A machine set <code>private_only = true</code> serves only its owner's self-route traffic.</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Hardware-trust floor</td>
+<td>Production minimum is <code>hardware</code>. Self-route to an owned machine relaxes this to <code>none</code> — a personal Mac will not be MDM-enrolled.</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Runtime verified</td>
+<td>Reported runtime hashes match the known-good manifest.</td>
+</tr>
+<tr>
+<td>10</td>
+<td><strong>Private-text support</strong></td>
+<td>The privacy chokepoint, <code>coordinator/registry/registry.go:926</code> — see <a href="attestation.html">attestation.md</a>. Never relaxed, including for self-route.</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Challenge freshness</td>
+<td>The last attestation challenge verified within the maximum age window.</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Trait eligibility</td>
+<td>Vision-capable builds for media requests; version floors for tool requests (<code>tools</code> capability ≥ 0.6.3); render-broken builds fenced for every shape.</td>
+</tr>
+</tbody>
+</table></div>
+<p>Self-route relaxes exactly two gates (7 and 8). Every privacy-critical gate still applies.</p>
+<h2>Stage 2 — the cost function</h2>
+<p>For each surviving provider the scheduler estimates completion time in milliseconds:</p>
+<pre><code>costMs = stateMs + queueMs + pendingMs + backlogMs + thisReqMs + healthMs
+</code></pre>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>stateMs</code></td>
+<td>Slot-state penalty: 0 for <code>running</code>/<code>idle</code>, 30 s for <code>unknown</code>, 20 s for <code>idle_shutdown</code>; <code>crashed</code>/<code>reloading</code> are ineligible</td>
+</tr>
+<tr>
+<td><code>queueMs</code></td>
+<td>effective queue depth × 3,000 ms</td>
+</tr>
+<tr>
+<td><code>pendingMs</code></td>
+<td>total pending requests × 750 ms</td>
+</tr>
+<tr>
+<td><code>backlogMs</code></td>
+<td>tokens already committed ÷ effective decode TPS</td>
+</tr>
+<tr>
+<td><code>thisReqMs</code></td>
+<td>promptTokens ÷ prefillTPS + maxTokens ÷ effectiveTPS</td>
+</tr>
+<tr>
+<td><code>healthMs</code></td>
+<td>penalty from memory pressure, CPU, thermal state, GPU utilization (from heartbeats)</td>
+</tr>
+</tbody>
+</table></div>
+<p>Effective decode TPS resolves in priority order: the provider's own observed EWMA under load → the fleet median for the same model and chip family → a load-scaled benchmark fallback. Lowest cost wins; near-ties break by queue depth, then pending load, then randomly among equals to prevent hot-spotting. Capacity is reserved atomically before the provider is returned. Reputation is not a multiplicative score — health simply feeds the additive <code>healthMs</code> term.</p>
+<h2>Admission and capacity</h2>
+<ul>
+<li><strong>Token-budget admission.</strong> Providers report real engine capacity in heartbeats: active tokens, max potential, queued budget, EWMA decode TPS. The coordinator admits against the engine's own numbers, not a guess.</li>
+<li><strong>Gray-box budget clamp</strong> (<code>coordinator/registry/budget_clamp.go</code>). After a capacity-503 proved the live gate is rejecting, admission stops believing the stale-optimistic heartbeat budget until a fresh one arrives.</li>
+<li><strong>Queueing.</strong> All providers busy → the request queues with a 120 s timeout; the fleet at capacity returns 429 with <code>Retry-After</code> (OpenRouter-compatible); exhaustion returns 503.</li>
+</ul>
+<h2>Failure handling during dispatch</h2>
+<ul>
+<li><strong>Speculative TTFT dispatch.</strong> At 50% of the first-token deadline, the coordinator dispatches to a backup provider. First token wins; the loser is cancelled.</li>
+<li><strong>Pre-content failover.</strong> The loop does not commit to a provider on boilerplate chunks (role-only delta, <code>response.created</code>) — only on the first content-bearing chunk. A provider that dies before content is retried invisibly on another machine.</li>
+<li><strong>A privacy consequence of both, stated plainly:</strong> one prompt can be sealed to and decrypted by <strong>more than one</strong> attested provider — the speculative backup, and each failover target, decrypts and prefills the prompt before its cancel arrives. Every such machine passed the same full attestation gates, and its buffers are zeroed on cancellation like on completion — but the exposure surface per prompt is N attested processes, not always 1.</li>
+<li><strong>Cancellation.</strong> A consumer disconnect propagates coordinator → provider → engine within 1 s, so generation stops promptly.</li>
+<li><strong>Two-lane provider writer</strong> (<code>coordinator/registry/provider_writer.go</code>). Control frames (challenges, cancels, trust status) take strict priority over data frames on the provider WebSocket, with a per-connection write watchdog — a slow stream can never starve a security challenge.</li>
+</ul>
+<h2>Trust tiers, from the consumer's seat</h2>
+<p>The consumer picks a minimum with the <code>trust_level</code> parameter: <code>none</code>, <code>self_signed</code>, or <code>hardware</code>. Production enforces <code>hardware</code>, and private text additionally requires code attestation once enforcement is on. Every response says what served it via <code>X-Provider-Trust-Level</code> and its sibling headers — see <a href="encryption-path.html">encryption-path.md</a>.</p>
+<footer>Darkbloom explainer docs &middot; generated from <code>routing.md</code> &middot; 2026-08-27</footer>
+</main>
+</body>
+</html>

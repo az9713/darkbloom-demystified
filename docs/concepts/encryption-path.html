@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>The Encryption Path</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0f172a; color: #cbd5e1;
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { color: #e2e8f0; line-height: 1.25; }
+h1 { font-size: 1.9rem; border-bottom: 2px solid #334155; padding-bottom: 12px; }
+h2 { font-size: 1.4rem; margin-top: 2.2em; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
+h3 { font-size: 1.15rem; margin-top: 1.8em; }
+a { color: #2dd4bf; text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #e2e8f0; }
+code { background: #1e293b; color: #fb923c; padding: 2px 6px; border-radius: 4px;
+  font: 0.875em ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: #e2e8f0; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 0.925rem; }
+th, td { border: 1px solid #334155; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #1e293b; color: #e2e8f0; }
+tr:nth-child(even) td { background: rgba(30, 41, 59, 0.45); }
+blockquote { border-left: 3px solid #fb923c; margin: 1em 0; padding: 4px 18px;
+  color: #94a3b8; background: #1e293b; border-radius: 0 8px 8px 0; }
+li { margin: 4px 0; }
+hr { border: none; border-top: 1px solid #334155; margin: 2em 0; }
+footer { margin-top: 60px; color: #94a3b8; font-size: 0.85rem;
+  border-top: 1px solid #1e293b; padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+<h1>The Encryption Path</h1>
+<p>This document traces one prompt from your SDK to the GPU and back, and states exactly who can read it where.</p>
+<h2>The precise claim first</h2>
+<p>Darkbloom's encryption is <strong>hop-by-hop, not strict end-to-end</strong>. Plaintext exists in exactly one intermediate place: transiently, inside the coordinator's memory, for routing and billing. The coordinator never logs the prompt and never stores the prompt. It immediately re-seals the body for the selected provider.</p>
+<p>State the claim this way. The repository itself is inconsistent: <code>d-inference/AGENTS.md</code> and <code>d-inference/CLAUDE.md</code> both say "the coordinator never sees plaintext prompts" — the loose version. The <code>README.md</code> "Precise claim" block and the paper's Coordinator Trust Boundary section give the correct version, and <code>d-inference/docs/architecture/security/encryption.md</code> documents it. Use the precise version.</p>
+<p>One more layer of precision, from the repository's own operations docs: the paper says that transient plaintext sits in an <strong>SEV-SNP</strong> Confidential VM. The production deploy runbook (<code>d-inference/docs/operations/coordinator-deploy.md</code>) says the VM runs AMD <strong>SEV</strong> with maintenance policy <code>MIGRATE</code> and instructs: "Do not claim SEV-SNP for this VM." The difference matters and is spelled out at Hop 2 below.</p>
+<h2>The five hops</h2>
+<h3>Hop 1 — Consumer → Coordinator</h3>
+<p>Transport: TLS 1.3 over HTTPS to <code>https://api.darkbloom.dev/v1</code>.</p>
+<p>Optional extra seal: the consumer can fetch the coordinator's long-lived X25519 public key from <code>GET /v1/encryption-key</code> and seal the request body with NaCl Box. This is not a middlebox nicety — it is the only defense against observation between TLS termination and the coordinator process (see Hop 2). The threat model registers it as <strong>optional and off by default</strong> (<code>d-inference/docs/threat-model.yaml</code>, SEC-015), and the console UI ships with it off in the default configuration.</p>
+<h3>Hop 2 — Inside the coordinator: design vs. production</h3>
+<p>The design: plaintext exists only inside SEV-SNP-encrypted CVM memory, unreachable even by the operator. The production reality, from the deploy runbook:</p>
+<ul>
+<li>TLS terminates in a <strong>host Caddy</strong> service on the VM, which proxies plaintext over localhost to the coordinator container on <code>:8080</code> (host network) — so without Hop-1 sealing, the request body crosses the VM in the clear between Caddy and the coordinator process.</li>
+<li>The VM reports AMD <strong>SEV</strong>, not SEV-SNP: memory is encrypted against the cloud host, but there is no memory integrity and no guest attestation report — and no SEV variant protects against root <strong>inside</strong> the guest.</li>
+<li>The operator has IAP SSH into that VM. An operator at a root shell inside the guest can technically observe the localhost hop and the coordinator process. Hop-1 sealing closes the localhost exposure; process-memory access by guest root is closed by policy and audit, not hardware, today.</li>
+</ul>
+<p>So the honest sentence is: <strong>today, the operator cannot casually see prompts (nothing is logged or stored), but is technically able to — the hardware guarantee against the operator that the paper describes is not yet deployed.</strong> The coordinator needs the plaintext to:</p>
+<ul>
+<li>resolve the model and count prompt tokens for billing,</li>
+<li>apply routing gates and pick a provider,</li>
+<li>normalize tool JSON-Schemas before encryption (<code>coordinator/api/toolschema.go</code>), so lagging providers never receive template-crashing shapes.</li>
+</ul>
+<h3>Hop 3 — Coordinator → Provider (the mandatory seal)</h3>
+<p>For <strong>every</strong> request the coordinator:</p>
+<ol>
+<li>Generates a fresh ephemeral X25519 key pair <code>(sk_e, pk_e)</code>.</li>
+<li>Generates a random 24-byte nonce <code>n</code>.</li>
+<li>Encrypts: <code>c = Box(body, n, pk_provider, sk_e)</code>, where <code>pk_provider</code> is the provider's <strong>attested</strong> X25519 key — the key bound to its Secure Enclave identity in the attestation blob.</li>
+<li>Sends <code>(pk_e, n || c)</code> over the provider's outbound WebSocket.</li>
+</ol>
+<p>Code: <code>coordinator/api/dispatch.go:1457</code> (queued path; <code>consumer.go:1041</code> for the direct path), using <code>coordinator/internal/e2e/e2e.go</code>. This seal is not optional and has no plaintext fallback.</p>
+<p>Wire format: <code>24-byte nonce || Poly1305 tag || ciphertext</code>. Go (<code>nacl/box</code>), Swift (libsodium), and a Rust <code>crypto_box</code> (v0.9) reference implementation all produce and read the same bytes — proven by <code>coordinator/internal/e2e/cross_compat_test.go</code> and a tamper test.</p>
+<h3>Hop 4 — Inside the provider</h3>
+<p>Only the hardened Darkbloom process holds the matching X25519 secret. The secret exists only in that process's memory (<code>provider-swift/Sources/ProviderCore/Crypto/NodeKeyPair.swift</code>), protected by the mechanisms in <a href="access-path-elimination.html">access-path-elimination.md</a>. Decryption happens at <code>ProviderLoop+InferenceHandler.swift:233</code>, and a fast-path drain check runs <strong>before</strong> decryption so an overloaded provider rejects without ever opening the seal. Decryption failure logs only the error type, never content.</p>
+<p>The provider parses the OpenAI-format request from the decrypted bytes and runs generation in the same address space.</p>
+<h3>Hop 5 — Provider → Coordinator → Consumer</h3>
+<p>Each response SSE chunk is encrypted back to the coordinator's <strong>ephemeral</strong> public key <code>pk_e</code> from this request. The coordinator memoizes the per-request X25519 shared key for chunk decryption and forgets it when the request terminates (<code>coordinator/api/chunk_key_cache.go</code>). It decrypts each chunk, meters usage, and relays the stream to the consumer over TLS (re-sealed if the consumer enabled Hop-1 sealing).</p>
+<h2>Forward secrecy</h2>
+<p>Each request gets its own ephemeral coordinator key pair. Compromise of one ephemeral key decrypts one request — never past or future traffic. The provider's X25519 key is not in a file an owner can steal usefully: it lives in hardened-process memory, and its <strong>binding</strong> to the Secure Enclave identity is what the coordinator verifies (<code>encryptionPublicKey</code> field of the attestation blob must match the registration message).</p>
+<h2>What each party can read</h2>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Party</th>
+<th>Can read</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Network observer</td>
+<td>TLS ciphertext; packet timing</td>
+</tr>
+<tr>
+<td>Cloud host of the coordinator</td>
+<td>Encrypted guest memory (AMD SEV)</td>
+</tr>
+<tr>
+<td>Coordinator process</td>
+<td>Plaintext, transiently; never logged or stored</td>
+</tr>
+<tr>
+<td>Darkbloom operator (IAP SSH into the VM)</td>
+<td>Technically reachable today: the Caddy→coordinator localhost hop (closed by Hop-1 sealing, which is off by default — SEC-015) and, as guest root, coordinator process memory. Held to "does not" by policy and audit, not yet by hardware</td>
+</tr>
+<tr>
+<td>Provider's Mac owner (root)</td>
+<td>Ciphertext on the wire; nothing in process memory (see <a href="access-path-elimination.html">access-path-elimination.md</a>); packet timing</td>
+</tr>
+<tr>
+<td>Hardened provider process</td>
+<td>Plaintext — it must, to run the model</td>
+</tr>
+</tbody>
+</table></div>
+<p>The response carries proof headers the consumer can check: <code>X-Provider-Trust-Level</code>, <code>X-Provider-Attested</code>, <code>X-Provider-Encrypted</code>, <code>X-Provider-Chip</code>, <code>X-Provider-Secure-Enclave</code>.</p>
+<h2>What outlives the request</h2>
+<p>The stream ends. What remains, where:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Data</th>
+<th>Where</th>
+<th>Protection</th>
+<th>Lifetime</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Prompt/output buffers (provider)</td>
+<td>Process memory</td>
+<td>Zeroed with <code>memset_s</code> on completion</td>
+<td>Until request end</td>
+</tr>
+<tr>
+<td>KV cache (provider)</td>
+<td>Memory, optionally SSD block store</td>
+<td>Encrypted at rest with a Secure-Enclave-wrapped key-encryption key (<code>ProviderCore/KVCache/</code>, <code>KVCacheSSD/</code>)</td>
+<td>Until eviction/idle unload (1 h idle unloads the model)</td>
+</tr>
+<tr>
+<td>Prefix-cache coordination state (coordinator)</td>
+<td>Registry memory</td>
+<td>Opaque HMAC route/scope keys only — scoped per account, no prompt content on the wire (<code>coordinator/registry/cache_route_keys.go</code>)</td>
+<td>Session state</td>
+</tr>
+<tr>
+<td>Per-request chunk key (coordinator)</td>
+<td>Memory</td>
+<td>Forgotten at request terminal (<code>coordinator/api/chunk_key_cache.go</code>)</td>
+<td>Until request end</td>
+</tr>
+<tr>
+<td>Prompt content in logs/telemetry</td>
+<td>Nowhere</td>
+<td>Never logged; telemetry field allowlist is the structural backstop (<code>coordinator/api/telemetry_handlers.go</code>)</td>
+<td>—</td>
+</tr>
+<tr>
+<td>"Prompt artifacts" on the deploy disk</td>
+<td><code>/mnt/disks/userdata</code></td>
+<td>These are prompt-<strong>contract templates</strong> (system-prompt sidecar files), not user prompts</td>
+<td>Deploy asset</td>
+</tr>
+</tbody>
+</table></div>
+<p>Two paths this table cannot fully close on the provider, stated honestly: the code takes no <code>mlock</code>-style step to pin sensitive buffers out of swap (macOS encrypts swap by default, which is the actual mitigation), and GPU memory reuse after deallocation is not separately scrubbed. The provider self-caffeinates while serving, which narrows — but does not remove — sleep/hibernation windows.</p>
+<h2>Why not strict end-to-end?</h2>
+<p>Strict E2E (consumer seals directly to the provider) would blind the coordinator to token counts (billing), to model resolution, and to the tool-schema normalization that protects providers from malformed input. Darkbloom chooses a trusted intermediary instead. The paper's supporting claim — consumers can verify the attested coordinator image — has no consumer-facing procedure today: no public endpoint, script, or doc lets you check the image measurement yourself, and plain SEV produces no guest attestation report to check. Until that ships (and the VM moves to SEV-SNP), coordinator trust rests on the published code, the operational record, and the threat model's own candor. The trade is explicit and documented, not hidden.</p>
+<footer>Darkbloom explainer docs &middot; generated from <code>encryption-path.md</code> &middot; 2026-08-27</footer>
+</main>
+</body>
+</html>
