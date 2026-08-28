@@ -40,6 +40,20 @@ The fifth witness is the cleverest, because it solves a problem Apple never gave
 
 Only a Mac that satisfies all five witnesses ever receives private traffic. In the code this is one single gate function every request must pass; there are no exceptions, not even for your own machine.
 
+## How a Mac joins — nobody "discovers" it
+
+A natural question: how does the network find all these Macs in people's homes? The answer is that it never does. There is no scanning, no probing, no directory of machines waiting to be found. Every Mac in the fleet is there because its owner typed one command, and the machine then introduced itself — always dialing outward, never answering a knock.
+
+The joining ritual goes like this. The owner runs a single install command in the terminal. The script downloads the Darkbloom software and refuses to run it until two checks pass: the download's fingerprint — a SHA-256 hash — matches the published one, and Apple's own code-signature verification confirms the program is the genuine, notarized build. The script then reads the Mac's serial number from the system and asks the coordinator for a personalized enrollment profile made for exactly that machine.
+
+Installing that profile is the moment of consent, and macOS makes it explicit: the system shows the owner precisely what the profile grants before anything is installed. What it grants is deliberately tiny — of the thirteen powers Apple's device-management system can hand out, Darkbloom requests only the three that ask questions: inspect the device, read its basic information, and read its security settings. The powers that act — erase the device, lock it, install software, change settings — are all explicitly withheld. The management server can interrogate the Mac; it can never touch it.
+
+Next, the owner runs a login command. The Mac displays a short code; the owner types that code into the Darkbloom website while signed in to their account. That is the whole linking ceremony — an internet standard called the device-code flow, the same pattern a TV app uses — and it ties this machine to this owner for earnings and for the free use of one's own hardware.
+
+From then on, the Mac does all the talking. It opens one outgoing connection to the coordinator — outgoing is the key word, because a home router happily allows calls out while blocking calls in, so no port forwarding and no firewall changes are ever needed. Over that connection the machine presents its credentials: the signed statement from its security chip, its encryption key, its push-notification address, and honest facts about its hardware — which chip, how much memory. The five witnesses from the previous section then interrogate everything it claimed. After that, a steady heartbeat tells the coordinator what models the machine holds in memory and how much real capacity its engine can take, and only then does paying work start to flow.
+
+Leaving is as undramatic as joining. The owner can stop the program at any moment, mark the machine as private so it serves only its own owner, or remove the enrollment profile in System Settings — which deletes the management link and its certificates immediately and completely. A vanished Mac simply stops heartbeating; the coordinator routes around it within seconds, and any request it was holding quietly restarts elsewhere.
+
 ## The fleet and the money
 
 The network itself is a swarm of home computers behind home routers, and the engineering embraces that. Every Mac dials out to the coordinator — no port forwarding, no firewall changes — and reports a heartbeat with its true, engine-measured capacity. The coordinator estimates, in milliseconds, how long each eligible Mac would take to finish your request, and picks the cheapest. If the chosen Mac dies before producing a word, your request silently retries elsewhere; if it is slow to start, a backup Mac races it. A quiet controller watches demand and tells Macs to pre-load models before the next wave arrives. Measured on real hardware: 92 tokens per second on an M4 Max, first word in about a second and a half.
