@@ -1,4 +1,4 @@
-# d-inference-tutorial
+# darkbloom-demystified
 
 **This is the tutorial clone of the original [d-inference](https://github.com/Layr-Labs/d-inference) repository.** It does not contain the Darkbloom source code. It contains an independent explainer documentation set that demystifies how Darkbloom works, written from two primary sources:
 
@@ -9,14 +9,14 @@ Video introduction: Matt Berman's ["This feels illegal..."](https://www.youtube.
 
 ## About
 
-Darkbloom rents idle Apple Silicon Macs as a private, OpenAI-compatible inference cloud: the Mac owner has root access and physical custody, yet cannot read the prompts or replies their machine processes. This tutorial demystifies how — the hop-by-hop encryption, the five attestation layers, the routing and fleet management, the micro-USD accounting — and states plainly what is solved, what is partial, and what remains open. Every claim cites a file and line in the original repository. Start at the [website](https://az9713.github.io/d-inference-tutorial/) or [`docs/index.md`](docs/index.md).
+Darkbloom rents idle Apple Silicon Macs as a private, OpenAI-compatible inference cloud: the Mac owner has root access and physical custody, yet cannot read the prompts or replies their machine processes. This tutorial demystifies how — the hop-by-hop encryption, the five attestation layers, the routing and fleet management, the micro-USD accounting — and states plainly what is solved, what is partial, and what remains open. Every claim cites a file and line in the original repository. Start at the [website](https://az9713.github.io/darkbloom-demystified/) or [`docs/index.md`](docs/index.md).
 
 Darkbloom turns idle Apple Silicon Macs into a private, OpenAI-compatible inference cloud. The Mac owner has root access and physical custody — yet the owner cannot read the prompts or the replies. These docs explain how that works, how the network manages a fleet of home machines, how the accounting stays fair, and which hard questions remain open.
 
 ## Read the tutorial
 
-- **Website (GitHub Pages):** https://az9713.github.io/d-inference-tutorial/
-- **Plain-English prose explainer:** [Darkbloom in Plain English](https://az9713.github.io/d-inference-tutorial/plain-english.html) — the whole story in narrative form, no tables, no unexplained jargon
+- **Website (GitHub Pages):** https://az9713.github.io/darkbloom-demystified/
+- **Plain-English prose explainer:** [Darkbloom in Plain English](https://az9713.github.io/darkbloom-demystified/plain-english.html) — the whole story in narrative form, no tables, no unexplained jargon
 - **Markdown entry point:** [`docs/index.md`](docs/index.md)
 
 | Section | Content |
