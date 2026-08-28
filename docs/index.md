@@ -8,6 +8,7 @@ These documents explain the system. Sources: the paper `dginf-private-inference.
 
 | Question | Document |
 |---|---|
+| Just tell me the whole story, no jargon | [plain-english.md](plain-english.md) |
 | What is Darkbloom? Why does it exist? | [overview/what-is-darkbloom.md](overview/what-is-darkbloom.md) |
 | What do the terms mean? | [overview/key-concepts.md](overview/key-concepts.md) |
 | How does a prompt travel? Who can read it where? | [concepts/encryption-path.md](concepts/encryption-path.md) |

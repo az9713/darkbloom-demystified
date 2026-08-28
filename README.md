@@ -16,6 +16,7 @@ Darkbloom turns idle Apple Silicon Macs into a private, OpenAI-compatible infere
 ## Read the tutorial
 
 - **Website (GitHub Pages):** https://az9713.github.io/d-inference-tutorial/
+- **Plain-English prose explainer:** [Darkbloom in Plain English](https://az9713.github.io/d-inference-tutorial/plain-english.html) — the whole story in narrative form, no tables, no unexplained jargon
 - **Markdown entry point:** [`docs/index.md`](docs/index.md)
 
 | Section | Content |

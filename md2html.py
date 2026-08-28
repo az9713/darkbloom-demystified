@@ -79,4 +79,4 @@ for src in sorted(DOCS.rglob("*.md")):
     print(f"{out.relative_to(DOCS)}  <-  {src.relative_to(DOCS)}")
 
 print(f"{count} files converted")
-assert count == 12, f"expected 12 md files, found {count}"
+assert count == 13, f"expected 13 md files, found {count}"

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Darkbloom in Plain English</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0f172a; color: #cbd5e1;
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { color: #e2e8f0; line-height: 1.25; }
+h1 { font-size: 1.9rem; border-bottom: 2px solid #334155; padding-bottom: 12px; }
+h2 { font-size: 1.4rem; margin-top: 2.2em; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
+h3 { font-size: 1.15rem; margin-top: 1.8em; }
+a { color: #2dd4bf; text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #e2e8f0; }
+code { background: #1e293b; color: #fb923c; padding: 2px 6px; border-radius: 4px;
+  font: 0.875em ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: #e2e8f0; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 0.925rem; }
+th, td { border: 1px solid #334155; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #1e293b; color: #e2e8f0; }
+tr:nth-child(even) td { background: rgba(30, 41, 59, 0.45); }
+blockquote { border-left: 3px solid #fb923c; margin: 1em 0; padding: 4px 18px;
+  color: #94a3b8; background: #1e293b; border-radius: 0 8px 8px 0; }
+li { margin: 4px 0; }
+hr { border: none; border-top: 1px solid #334155; margin: 2em 0; }
+footer { margin-top: 60px; color: #94a3b8; font-size: 0.85rem;
+  border-top: 1px solid #1e293b; padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Darkbloom in Plain English</h1>
+<p>This page tells the whole Darkbloom story in prose, with no tables and no jargon left unexplained. Every number here is real and comes from the paper or the code. The detailed pages under <a href="index.html">concepts/</a> back each claim with file and line references.</p>
+<h2>The idea</h2>
+<p>There are more than 100 million Apple Silicon Macs in the world, and most of them sit idle most of the day. Each one carries a surprisingly powerful chip with up to hundreds of gigabytes of fast shared memory — enough to run large AI models at conversational speed. Darkbloom connects that sleeping capacity to people who need AI answers, and pays the Mac owners for the work.</p>
+<p>The obvious objection arrives immediately. If my prompt runs on a stranger's Mac in a stranger's home, the stranger can read it. They own the machine. They have the administrator password. They can plug things into it. Darkbloom's entire reason to exist is making that objection false.</p>
+<h2>The trick: remove the doors instead of hiding the room</h2>
+<p>Expensive data-center chips solve this problem with special hardware that encrypts memory while programs run. Apple's chips cannot do that for outside software. So Darkbloom does something different, borrowed from Apple's own Private Cloud Compute: instead of encrypting the room, it removes every door.</p>
+<p>Think of the Mac owner as a landlord with keys to every room in the building. Darkbloom builds a room with no doors at all. The work happens inside one single program — the AI model, the network connection, and the decryption key all live inside the same process, in the same protected memory. There is no second program to spy on, no local network traffic to record, no pipe between processes to tap. On the private path, the only helper programs it ever launches are security checks that never touch your data.</p>
+<p>Then three locks from Apple's operating system seal that process. First, the program tells the operating system's core — the kernel — to permanently refuse all debugger connections, even from the administrator. Second, the program is signed in a way that makes the kernel reject any attempt by another program to read its memory. Third, a macOS feature called System Integrity Protection, SIP, stops even the administrator from switching those first two locks off.</p>
+<p>Here is the elegant part, and it is a genuine proof, not a slogan. The only way to turn SIP off is to restart the Mac into a special recovery mode. But restarting kills every running program — including the Darkbloom process, whose secrets exist only in memory and die with it. So if the protections were on when the process started, they stay on for as long as the process lives. Checking once at startup is mathematically enough; the software still re-checks on every request anyway, which costs all of 12 milliseconds.</p>
+<p>What remains for a truly determined attacker? Physically unsoldering the memory chips to probe them — which destroys them, because Apple solders memory directly into the processor package. Apple accepts exactly the same residual risk for its own private AI cloud. Everything short of a soldering iron is engineered out.</p>
+<h2>The journey of one prompt</h2>
+<p>You send a question using any standard AI app or library — Darkbloom speaks the same dialect as OpenAI's API, so most software works after changing one web address. Your question travels over an encrypted connection to the coordinator, Darkbloom's traffic-control service in the cloud.</p>
+<p>The coordinator must briefly see your question in plain form. It has honest reasons: it counts the words to bill you, checks your balance, and picks the best Mac for the job. It never writes your question to any log or database, and it forgets the request's keys the moment the answer finishes. Then it wraps your question in a fresh, single-use envelope of encryption — a new random key for every single request — addressed so that only one specific program on one specific Mac can open it. Even the Mac's owner, watching their own network cable, sees only scrambled bytes.</p>
+<p>The doorless room on that Mac opens the envelope, runs the model on the Apple graphics chip, and streams the answer back, each piece encrypted again for the return trip. When the request ends, the program deliberately overwrites the memory that held your words, using a function the compiler is forbidden to optimize away.</p>
+<p>One honesty note the project itself insists on: this is relay encryption, hop by hop, not sealed end-to-end. And the docs must be more honest still. The design calls for the coordinator to run inside a special cloud machine whose memory even its operator cannot read. The deployment documents in the repository admit production is not there yet — today's cloud machine has a weaker protection level, and an operator with maintenance access could technically reach that brief plaintext moment. Nothing is stored, and policy forbids looking, but today that promise rests on policy, not physics. The stronger hardware is the stated plan.</p>
+<h2>Trust, or how to believe a stranger's computer</h2>
+<p>Encrypting to a Mac only helps if that Mac is genuinely secure and running genuine software. But the person reporting all this is the very person you distrust. Darkbloom's answer is five independent witnesses.</p>
+<p>The first witness is a special security chip inside every Apple Silicon Mac, the Secure Enclave, which signs statements with a key that physically cannot leave the chip. That proves which machine is talking. The second witness is macOS itself: through Apple's device-management system, the operating system — not the owner's software — reports whether the security locks are on. The third witness is Apple the company: its servers issue a signed certificate vouching that this is real Apple hardware with real security settings, and forging that would mean breaking Apple's own certificate authority. The fourth witness is time: every five minutes the coordinator issues a fresh challenge, and a Mac that rebooted to weaken itself gets caught and expelled immediately, with no grace period.</p>
+<p>The fifth witness is the cleverest, because it solves a problem Apple never gave Mac developers a tool for: proving which program is running. Darkbloom repurposes Apple's push-notification service. Apple's own kernel gatekeeper only delivers a push notification to a program whose signature, identity, and entitlements all check out — a tampered or imitation program simply never receives it. So the coordinator encrypts a random number, sends it as a push notification, and waits. Only the genuine Darkbloom program can receive the push, decrypt the number, and sign it back with the security chip. A lying fork of the software fails this test not because it is caught lying, but because the test never reaches it.</p>
+<p>Only a Mac that satisfies all five witnesses ever receives private traffic. In the code this is one single gate function every request must pass; there are no exceptions, not even for your own machine.</p>
+<h2>The fleet and the money</h2>
+<p>The network itself is a swarm of home computers behind home routers, and the engineering embraces that. Every Mac dials out to the coordinator — no port forwarding, no firewall changes — and reports a heartbeat with its true, engine-measured capacity. The coordinator estimates, in milliseconds, how long each eligible Mac would take to finish your request, and picks the cheapest. If the chosen Mac dies before producing a word, your request silently retries elsewhere; if it is slow to start, a backup Mac races it. A quiet controller watches demand and tells Macs to pre-load models before the next wave arrives. Measured on real hardware: 92 tokens per second on an M4 Max, first word in about a second and a half.</p>
+<p>The money is deliberately boring, which is what you want from money. Everything is counted in millionths of a dollar, in whole numbers, so nothing rounds away. Before a request runs, its estimated cost is set aside from your balance; afterwards the exact cost is settled and the difference refunded. A dishonest provider inflating its numbers hits a hard ceiling — the bill can never exceed twice the estimate — and completed work that reports zero tokens bills you nothing and raises an alarm. During the alpha, providers keep one hundred percent of what their Macs earn, and a Mac owner using their own machine pays nothing at all. There is even a pool-funded base income for reliable machines, tiered by verified memory — about the price of a Netflix subscription per month for a 64-gigabyte Mac — capped so nobody can farm it with fake hardware, because the memory claim is checked against Apple's own records for that serial number.</p>
+<p>Why do the economics work at all? Because modern "mixture-of-experts" models only wake a small fraction of themselves for each word, and consumer chips with big shared memory are perfect for that shape. For those models, electricity on a Mac costs six to thirty-two times less per word than renting the equivalent from a cloud API.</p>
+<h2>What it does not do</h2>
+<p>Darkbloom's docs are at their best when they say this plainly, so this page ends the same way. The owner cannot read your words, but can see their timing, which leaks roughly how long your question and answer were. The whole edifice assumes Apple's kernel has no unpatched hole. Apple itself is a single point of trust five times over. Nobody can yet cryptographically prove the model computed your answer correctly — billing and correctness both rest on detection and clamps, not proofs. And the coordinator's hardware privacy shield, as noted above, is still the design rather than the deployment.</p>
+<p>That is the technology: a room with no doors, on a stranger's computer, vouched for by five witnesses, paid in millionths of a dollar. The rest of this site walks the same ground with file names and line numbers — start with <a href="overview/what-is-darkbloom.html">the overview</a>, or go straight to <a href="reference/unknown-unknowns.html">the questions you did not know to ask</a>.</p>
+<footer>Darkbloom explainer docs &middot; generated from <code>plain-english.md</code> &middot; 2026-08-27</footer>
+</main>
+</body>
+</html>
